@@ -312,7 +312,7 @@ def _classify_command(command: str, cwd: Path, depth: int) -> dict[str, Any]:
 
 
 def classify_command(command: str, cwd: Path) -> dict[str, Any]:
-    return _classify_command(command, cwd, 0)
+    return _classify_command(command, _normal_cwd(cwd), 0)
 
 
 def advisory_receipt(command: str, cwd: Path) -> dict[str, Any]:

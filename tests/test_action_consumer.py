@@ -1137,11 +1137,11 @@ class ActionConsumerTests(unittest.TestCase):
             item for item in bundle["documents"] if item["kind"] == "ledger_index"
         )
         self.assertEqual(
-            Path(ledger_document["path"]),
-            generation / "_LEDGER_INDEX.md",
+            Path(ledger_document["path"]).resolve(),
+            (generation / "_LEDGER_INDEX.md").resolve(),
         )
         self.assertIn("Current generation ledger", ledger_document["excerpt"])
-        self.assertEqual(Path(bundle["ledger"]["root_path"]), generation)
+        self.assertEqual(Path(bundle["ledger"]["root_path"]).resolve(), generation.resolve())
         self.assertEqual(bundle["ledger"]["snapshot"]["status"], "current_snapshot")
 
     def test_cli_stdout_is_strict_utf8_without_replacement_characters(self) -> None:

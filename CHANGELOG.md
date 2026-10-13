@@ -6,6 +6,13 @@ This project uses `vMAJOR.MINOR.PATCH` version labels.
 
 ## Unreleased
 
+## v1.2.9 - 2026-10-13
+
+- Canonicalize working-directory paths before deletion-scope classification,
+  including Windows short-path aliases and equivalent directory spellings.
+- Compare actual resolved ledger locations in portable tests. The hosted
+  Windows regression run identified the runner-specific short-path mismatch.
+
 ## v1.2.8 - 2026-10-13
 
 - Synchronized maintained runtime sources, including current nested tool

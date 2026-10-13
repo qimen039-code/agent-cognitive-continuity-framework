@@ -4113,7 +4113,7 @@
       "enabled": true,
       "schema": "cbh.dangerous_delete_advisory.v1",
       "entrypoint": "dangerous_delete_guard.py",
-      "entrypoint_sha256": "a6072e552fb4bbfa7a0952e65b3aa07a2e36c6a5fc54310fbbbbd3035b67f19c",
+      "entrypoint_sha256": "272702029c0112becfe0783b57b1c9bd55005b7334cfeb5f66aa4464a40756ab",
       "hash_algorithm": "sha256_raw_file_bytes",
       "invocation_mode": "direct_on_demand_only",
       "registered_hook_events": [],

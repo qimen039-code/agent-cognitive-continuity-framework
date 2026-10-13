@@ -73,6 +73,14 @@ class DangerousDeleteGuardTests(unittest.TestCase):
                 self.assertTrue(result["dangerous"], result)
                 self.assertIn(expected, result["reasons"])
 
+    def test_equivalent_working_directory_spellings_keep_the_same_scope(self) -> None:
+        equivalent = self.cwd / ".." / "workspace"
+        inside = classify_command(f"Remove-Item -LiteralPath '{self.inside}' -Force", equivalent)
+        outside = classify_command(f"Remove-Item -LiteralPath '{self.outside}' -Force", equivalent)
+        self.assertFalse(inside["dangerous"], inside)
+        self.assertTrue(outside["dangerous"], outside)
+        self.assertIn("target_not_strictly_inside_cwd", outside["reasons"])
+
     def test_dry_runs_are_not_high_risk(self) -> None:
         for command in ("git clean -ndx", "robocopy source destination /MIR /L", "Clear-RecycleBin -WhatIf"):
             with self.subTest(command=command):

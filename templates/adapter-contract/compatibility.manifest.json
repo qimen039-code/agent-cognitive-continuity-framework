@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1",
   "manifest_type": "codex_local_compatibility_manifest",
-  "harness_version": "v1.2.8",
+  "harness_version": "v1.2.9",
   "adapter": {
     "name": "codex-local",
     "version": "unverified",

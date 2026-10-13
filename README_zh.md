@@ -98,8 +98,8 @@ Codex 能读取工作区指令并运行本地工具，就可以在目标任务�
 - 宿主不支持的能力应标记为 `checked_missing` 或 `checked_blocked`，不能静默宣称启用。
 - 客户端、Hook 协议或相关配置更新后，需要重新运行本地兼容性检查。
 
-当前 main 分支版本：`v1.2.8`。
-最新已打 tag 的 GitHub Release：[`v1.2.8`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/tag/v1.2.8)。
+当前 main 分支版本：`v1.2.9`。
+最新已打 tag 的 GitHub Release：[`v1.2.9`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/tag/v1.2.9)。
 外部查询当前版本时，应同时核对默认分支 `VERSION` 与 GitHub
 [`releases/latest`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/latest)，
 二者必须指向同一版本。
