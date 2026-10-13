@@ -3,3 +3,12 @@ pytest-cache-files-*/
 __pycache__/
 *.pyc
 skills/embedded-harness/embedded_harness_policy.local.json
+*.local.json
+*.local.jsonl
+*.local.sqlite3
+*.local.sqlite3-*
+*.cumcwork
+tasks.local/
+.text-source-cache/
+integrations/codex-local/.test-tmp/
+skills/capability-router/registry.local/

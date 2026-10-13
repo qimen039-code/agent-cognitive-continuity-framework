@@ -1,7 +1,7 @@
 """Typed, advisory preflight for tools nested inside ``functions.exec``.
 
-The native Codex hook cannot see these calls.  This module therefore evaluates
-one already-selected nested call directly.  It never parses the surrounding
+Host interception depends on the actual nested dispatch surface. This module
+evaluates one explicitly selected call directly. It never parses the surrounding
 JavaScript, blocks the host, grants authority, writes memory, or persists state.
 """
 
@@ -39,6 +39,10 @@ _SHELL_FIELDS = {
     "justification",
     "prefix_rule",
     "login",
+}
+
+_EXEC_FIELDS = (_SHELL_FIELDS - {"command", "timeout_ms"}) | {
+    "cmd", "shell", "tty", "max_output_tokens", "yield_time_ms",
 }
 
 _WEB_FIELDS = {
@@ -116,6 +120,30 @@ def _validate_shell_arguments(arguments: Mapping[str, Any]) -> list[str]:
         if arguments.get("sandbox_permissions") != "require_escalated":
             _schema_issue(issues, "shell_command_prefix_rule_requires_escalation")
     return issues
+
+
+def _validate_exec_arguments(arguments: Mapping[str, Any]) -> list[str]:
+    # Share common field validation without changing the actual dispatch schema.
+    common = {key: value for key, value in arguments.items() if key in _SHELL_FIELDS - {"command", "timeout_ms"}}
+    issues = _validate_shell_arguments({**common, "command": arguments.get("cmd")})
+    issues = [issue.replace("shell_command_", "exec_command_") for issue in issues]
+    if set(arguments) - _EXEC_FIELDS:
+        issues.append("exec_command_unknown_argument_fields")
+    if "shell" in arguments and not isinstance(arguments["shell"], str):
+        issues.append("exec_command_shell_must_be_string")
+    if "tty" in arguments and not isinstance(arguments["tty"], bool):
+        issues.append("exec_command_tty_must_be_boolean")
+    for field in ("max_output_tokens", "yield_time_ms"):
+        if field in arguments and (isinstance(arguments[field], bool) or not isinstance(arguments[field], int)):
+            issues.append(f"exec_command_{field}_must_be_integer")
+    return issues
+
+
+def _uses_powershell(tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    if tool_name == "shell_command" or not arguments.get("shell"):
+        return True  # This local adapter's default shell is PowerShell.
+    executable = str(arguments["shell"]).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return executable in {"pwsh", "pwsh.exe", "powershell", "powershell.exe"}
 
 
 def _is_integer(value: Any, *, minimum: int | None = None) -> bool:
@@ -536,6 +564,8 @@ def preflight_nested_tool_call(
 
     if tool_name == "shell_command":
         schema_issues = _validate_shell_arguments(arguments)
+    elif tool_name == "exec_command":
+        schema_issues = _validate_exec_arguments(arguments)
     elif tool_name == "web__run":
         schema_issues = _validate_web_arguments(arguments)
     else:
@@ -555,20 +585,29 @@ def preflight_nested_tool_call(
             _append_reason(reasons, "broad_output_scope_review_required")
             decision = _promote(decision, "validation_required")
 
-    if tool_name == "shell_command" and not schema_issues:
-        command = str(arguments["command"])
+    is_shell = tool_name in {"shell_command", "exec_command"}
+    if is_shell and not schema_issues and not _uses_powershell(tool_name, arguments):
+        _append_reason(reasons, "shell_parser_not_covered")
+        decision = _promote(decision, "validation_required")
+
+    if is_shell and not schema_issues and _uses_powershell(tool_name, arguments):
+        command_key = "cmd" if tool_name == "exec_command" else "command"
+        command = str(arguments[command_key])
         carrier = _shell_carrier(command)
         if carrier == "inline_multi_runtime":
             _append_reason(reasons, "file_backed_carrier_required")
             decision = _promote(decision, "validation_required")
         parser_errors = powershell_parser_error_ids(command)
+        if parser_errors is None:
+            _append_reason(reasons, "powershell_parser_unavailable")
+            decision = _promote(decision, "validation_required")
         if parser_errors:
             _append_reason(reasons, "powershell_parser_rejection")
         behavior_receipt = build_behavior_correction_receipt(
             stage="pretool",
             environment="powershell",
             tool_role="unknown",
-            tool_surface="functions.exec_nested_shell_command",
+            tool_surface=f"functions.exec_nested_{tool_name}",
             text=command,
             parser_error_ids=parser_errors or (),
             execution_cwd=str(arguments.get("workdir") or ""),
@@ -584,7 +623,7 @@ def preflight_nested_tool_call(
                     "hook_event_name": "PreToolUse",
                     "tool_name": "Bash",
                     "cwd": str(arguments.get("workdir") or "."),
-                    "tool_input": dict(arguments),
+                    "tool_input": {"command": command},
                 }
             )
             updated = (
@@ -593,7 +632,7 @@ def preflight_nested_tool_call(
                 else None
             )
             if isinstance(updated, Mapping) and isinstance(updated.get("command"), str):
-                dispatch_arguments = dict(updated)
+                dispatch_arguments = {**arguments, command_key: updated["command"]}
                 rewrite_applied = True
                 decision = _promote(decision, "rewrite_candidate")
                 _append_reason(reasons, "verified_current_event_rewrite")

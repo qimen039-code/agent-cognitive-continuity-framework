@@ -121,6 +121,7 @@ def run_router_with_cwd(
     *,
     env: dict[str, str] | None = None,
     conversation_registry: Path | None = None,
+    thread_id: str | None = None,
 ) -> dict:
     if not POWERSHELL:
         pytest.skip("PowerShell is not available on PATH")
@@ -140,6 +141,8 @@ def run_router_with_cwd(
     ]
     if conversation_registry is not None:
         args.extend(["-ConversationRegistryPath", str(conversation_registry)])
+    if thread_id is not None:
+        args.extend(["-ThreadId", thread_id])
     _, payload = run_json(
         args,
         env=env,
@@ -473,7 +476,7 @@ ROUTER_CASES = [
     {
         "id": "TC-005a",
         "task": "将已有文件局部补丁规则同步进公开仓库",
-        "risk": "R3",
+        "risk": "R4",
         "gates": ["change_contract_gate"],
     },
     {
@@ -486,7 +489,7 @@ ROUTER_CASES = [
     {
         "id": "TC-005b",
         "task": "接续上一段对话记忆，创建此对话新记忆文件并链接上一段对话记忆文件",
-        "risk": "R3",
+        "risk": "R5",
         "gates": ["conversation_link_gate"],
         "expect": {
             "memory_lane": "current_conversation",
@@ -515,7 +518,7 @@ ROUTER_CASES = [
     },
     {
         "id": "TC-005e",
-        "task": "skill 调用周期结束后释放大正文并保留 skill release receipt，下次从恢复入口重新激活",
+        "task": "skill 调用周期结束后保留 skill release receipt，下次 reactivate from receipt",
         "risk": "R3",
         "expect": {
             "target_surface": "skill_matrix",
@@ -552,7 +555,7 @@ ROUTER_CASES = [
     {
         "id": "TC-005g-zh-combined",
         "task": "审计当前安装技能是否存在隐藏安全风险、重复功能和可合并项",
-        "risk": "R3",
+        "risk": "R4",
         "gates": ["skill_audit_gate", "change_contract_gate", "first_principles_gate"],
         "expect": {
             "target_surface": "skill_matrix",
@@ -712,7 +715,7 @@ ROUTER_CASES = [
     {
         "id": "TC-008c",
         "task": "检测框架是否还在生效，是否因为 Codex 版本大更新而漂移",
-        "risk": "R1",
+        "risk": "R4",
         "not_risk": "R3",
         "gates": ["read_only_context_gate"],
         "r3_context_surface": "read_only_diagnostic",
@@ -759,13 +762,7 @@ ROUTER_CASES = [
     {
         "id": "TC-009oa",
         "task": "复杂任务的每个实质阶段都要把局部内容放回最小相关系统中，并复用未变化的映射",
-        "gates": ["global_task_context_gate"],
-        "expect_contains": {
-            "semantic_ambiguity": "global_task_context_gate",
-        },
-        "expect_trigger_contains": {
-            "global_task_context_gate": "实质阶段",
-        },
+        "not_gates": ["global_task_context_gate"],
     },
     {
         "id": "TC-009ob",
@@ -907,7 +904,7 @@ ROUTER_CASES = [
     {
         "id": "TC-009f",
         "task": "自检后发现当前项目有大量记忆污染、目标污染、脏树债和技术债，先清查分组，清理必须清理项，并把可暂存内容标记为候选技术债",
-        "risk": "R3",
+        "risk": "R4",
         "gates": ["debt_hygiene_gate"],
         "expect_contains": {
             "semantic_ambiguity": "debt_hygiene_required",
@@ -1150,24 +1147,13 @@ def test_router_combines_global_context_and_feedback_prevention() -> None:
     assert payload["feedback_loop_profile"] == "explicit_cycle"
 
 
-def test_router_direct_outcome_first_gate_requires_bounded_mutation() -> None:
+def test_retired_direct_outcome_gate_stays_dormant_for_ordinary_ui_work() -> None:
     bounded = run_router("Change this button hover color to blue.")
     explanation = run_router("Explain how UI button hover states work.")
     systemic = run_router("Change the entire UI architecture into a reusable design system.")
 
-    assert contains(bounded.get("required_gates"), "direct_outcome_first_gate")
-    assert contains(
-        bounded.get("matched_risk_triggers", {}).get("direct_outcome_first_gate"),
-        "button",
-    )
-    assert contains(
-        bounded.get("compact_receipt", {}).get("action_binding_ids"),
-        "direct_outcome_first",
-    )
-    assert bounded.get("direct_outcome_first_instruction", {}).get("first_mutation_rule")
-    assert len(
-        bounded.get("direct_outcome_first_instruction", {}).get("expansion_allowed_only_if", [])
-    ) == 4
+    assert not contains(bounded.get("required_gates"), "direct_outcome_first_gate")
+    assert not contains(bounded.get("compact_receipt", {}).get("action_binding_ids"), "direct_outcome_first")
     assert not contains(explanation.get("required_gates"), "direct_outcome_first_gate")
     assert not contains(systemic.get("required_gates"), "direct_outcome_first_gate")
 
@@ -1198,7 +1184,7 @@ def test_router_uses_local_project_lane_overlay(tmp_path: Path) -> None:
     assert payload["risk_level"] != "R5"
 
 
-def test_router_promotes_explicit_project_record_request_to_r3(tmp_path: Path) -> None:
+def test_router_classifies_durable_project_record_request_as_r5(tmp_path: Path) -> None:
     project = tmp_path / "EXAMPLE_PROJECT"
     memory_bank = project / "memory-bank"
     memory_bank.mkdir(parents=True)
@@ -1220,7 +1206,7 @@ def test_router_promotes_explicit_project_record_request_to_r3(tmp_path: Path) -
     payload = run_router_with_cwd("record this problem", project, env=env)
 
     assert payload["project_lane"] == "EXAMPLE_PROJECT"
-    assert payload["risk_level"] == "R3"
+    assert payload["risk_level"] == "R5"
     assert payload["risk_context_decisions"]["R3"]["action_surface"] == "actionable_R3"
     assert payload["memory_lane"] == "current_project"
     assert payload["memory_mode"] == "write"
@@ -1244,7 +1230,7 @@ def test_router_recognizes_isolated_long_conversation_lane_without_writing_memor
     assert contains(payload.get("required_gates"), "lane_ownership_gate")
 
 
-def test_router_exposes_active_conversation_source_for_compound_memory_retrieval(tmp_path: Path) -> None:
+def test_router_exposes_exact_active_lane_for_explicit_conversation_navigation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     lane = workspace / "local-conversation-memory" / "active-lane"
     lane.mkdir(parents=True)
@@ -1253,20 +1239,38 @@ def test_router_exposes_active_conversation_source_for_compound_memory_retrieval
         encoding="utf-8",
     )
     (lane / "index.json").write_text(
-        json.dumps({"lane_state": "ACTIVE", "record_families": {}}, ensure_ascii=False),
+        json.dumps({"lane_state": "ACTIVE", "workspace_path": str(workspace),
+                    "thread_id": "TEST-ACTIVE-THREAD", "record_families": {}}, ensure_ascii=False),
         encoding="utf-8",
     )
 
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({
+        "schema": "cbh.active_conversation_memory_registry.v1",
+        "entries": [{
+            "registry_id": "TEST-ACTIVE-CONVERSATION",
+            "memory_id": "CONV-ACTIVE-FIXTURE",
+            "memory_type": "conversation_memory",
+            "state": "ACTIVE",
+            "chain_head": True,
+            "thread_id": "TEST-ACTIVE-THREAD",
+            "workspace_path": str(workspace),
+            "root_path": str(lane),
+        }],
+    }), encoding="utf-8")
+
     payload = run_router_with_cwd(
-        "关于我们的记忆机制中的检索机制，以及外部求索深度学习机制，是否能实际在触发时自动调用并实际生效。",
+        "读取当前对话记忆，回查上次已经确认的检索决定。",
         workspace,
+        conversation_registry=registry,
+        thread_id="TEST-ACTIVE-THREAD",
     )
 
     hints = payload["memory_source_hints"]
     assert len(hints) == 1
     assert hints[0]["lane"] == "current_conversation"
     assert Path(hints[0]["root_path"]).resolve() == lane.resolve()
-    assert contains(payload["action_binding_ids"], "retrieve_matching_memory")
+    assert contains(payload["action_binding_ids"], "resolve_conversation_link")
 
 
 def test_router_resolves_referenced_conversation_from_controlled_registry(tmp_path: Path) -> None:
@@ -1345,12 +1349,11 @@ def test_router_resolves_referenced_conversation_from_controlled_registry(tmp_pa
     assert Path(hints[0]["root_path"]).resolve() == lane.resolve()
 
 
-def test_router_binds_nonblocking_correction_lifecycle_for_tool_surface() -> None:
+def test_ordinary_tool_use_does_not_start_a_correction_workflow() -> None:
     payload = run_router("Use shell_command to inspect these files and summarize the result")
 
-    assert payload["correction_lifecycle_profile"] == "surface_preflight"
-    assert contains(payload["module_need"], "correction_lifecycle")
-    assert contains(payload["action_binding_ids"], "prepare_task_local_correction_bundle")
+    assert payload["correction_lifecycle_profile"] == "none"
+    assert "prepare_task_local_correction_bundle" not in payload["action_binding_ids"]
 
 
 def test_router_marks_project_long_term_memory_write_as_write_mode(tmp_path: Path) -> None:

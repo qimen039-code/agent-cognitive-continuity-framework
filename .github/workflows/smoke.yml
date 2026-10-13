@@ -49,7 +49,7 @@ jobs:
               [int[]] $AllowedExitCodes = @(0)
             )
 
-            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
+            $output = & pwsh -NoProfile -File $ScriptPath @Arguments 2>&1
             $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
             $text = ($output | Out-String).Trim()
 
@@ -220,7 +220,7 @@ jobs:
         run: pwsh -NoProfile -File .\tests\test_external_retrieval_strategy.ps1
 
       - name: Run pytest contract checks
-        run: python -m pytest tests
+        run: python -m pytest tests skills/capability-router/tests
 
   bash-smoke:
     name: Bash path and router smoke checks

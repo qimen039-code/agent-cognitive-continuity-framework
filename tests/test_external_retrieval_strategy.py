@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import sys
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
-HARNESS = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
-if str(HARNESS) not in sys.path:
-    sys.path.insert(0, str(HARNESS))
 
 from external_retrieval_strategy import build_external_retrieval_receipt
 

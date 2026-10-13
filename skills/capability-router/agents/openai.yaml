@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Capability Router"
+  short_description: "按需发现已注册的 skill、插件、MCP 与工具"
+  default_prompt: "Use $codex-capability-router to discover the best currently available capability for this task."

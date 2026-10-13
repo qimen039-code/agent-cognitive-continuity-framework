@@ -19,11 +19,16 @@ compiled_sections = [
   "router_decision_contract.explicit_record_triggers",
   "router_decision_contract.conversation_lane_declaration_triggers",
   "router_decision_contract.referenced_conversation_memory_contract",
+  "router_decision_contract.vague_memory_recall_contract",
   "router_decision_contract.causal_attribution_contract",
   "router_decision_contract.causal_attribution_triggers",
   "router_decision_contract.issue_prevention_gates",
-  "router_decision_contract.direct_outcome_first_contract",
   "router_decision_contract.conversation_memory_full_lane_triggers",
+  "router_decision_contract.tool_discovery_status_values",
+  "router_decision_contract.skill_or_tool_need_values",
+  "router_decision_contract.preferred_call_surface_values",
+  "router_decision_contract.tool_surface_discovery_rule",
+  "router_decision_contract.capability_discovery_contract",
   "search_and_learning_decision_matrix",
   "runtime_enforcement.behavior_correction_contract",
 ]
@@ -681,6 +686,156 @@ harness_governance_recall_triggers = [
   "能力减弱",
   "能力衰减",
 ]
+tool_discovery_status_values = [
+  "not_needed",
+  "not_checked",
+  "checked_available",
+  "checked_configured_not_exposed",
+  "checked_loaded_not_callable",
+  "checked_missing",
+  "checked_blocked",
+  "host_refresh_required",
+  "user_named",
+]
+skill_or_tool_need_values = [
+  "none",
+  "codex_native_skill",
+  "plugin_skill",
+  "local_skill",
+  "mcp_or_app_tool",
+  "shell_or_local_tool",
+  "web_search",
+  "registered_capability",
+]
+preferred_call_surface_values = [
+  "none",
+  "native_skill",
+  "plugin_or_connector",
+  "mcp_app_tool",
+  "local_skill",
+  "shell",
+  "web",
+  "browser_or_chrome",
+  "computer_use",
+  "capability_router",
+]
+tool_surface_discovery_rule = "Use an exposed tool or skill that covers the next action directly. When a concrete capability is missing, unclear or fails, query one relevant catalogue while preserving the user's named product and scope. Verify exposure, authentication, callability and action coverage separately; refresh only the selected surface once for unchanged state."
+
+[router_decision_contract.capability_discovery_contract]
+enabled = true
+schema = "cbh.capability_discovery_contract.v1"
+router_skill = "capability-router"
+meta_index_path = '../capability-router/registry.local/inventory/current.json'
+registry_script = '../capability-router/scripts/capability_registry.py'
+refresh_ttl_hours = 24
+source_fingerprint_invalidation = true
+miss_refresh_limit_per_query = 1
+runtime_candidate_limit = 8
+background_schedule = false
+current_task_truth_required = true
+rule = "CBH emits a semantic discovery requirement and compact intent signature only. The independent capability router resolves registered candidates, then the agent verifies current host exposure. CBH does not copy the registry, inject schemas, authenticate, call tools, or create permissions."
+
+[router_decision_contract.capability_discovery_contract.generic_triggers]
+explicit_surface = [
+  "skill",
+  "plugin",
+  "MCP",
+  "connector",
+  "tool",
+  "application",
+  "software",
+  "service",
+  "format",
+  "插件",
+  "连接器",
+  "工具",
+  "应用",
+  "软件",
+  "服务",
+  "格式",
+  "能力",
+]
+action = [
+  "use",
+  "call",
+  "invoke",
+  "open",
+  "operate",
+  "control",
+  "create",
+  "edit",
+  "read",
+  "write",
+  "search",
+  "publish",
+  "deploy",
+  "send",
+  "connect",
+  "使用",
+  "调用",
+  "操作",
+  "控制",
+  "打开",
+  "创建",
+  "编辑",
+  "读取",
+  "写入",
+  "搜索",
+  "发布",
+  "部署",
+  "发送",
+  "连接",
+]
+object = [
+  "app",
+  "platform",
+  "account",
+  "browser",
+  "window",
+  "terminal",
+  "console",
+  "document",
+  "spreadsheet",
+  "presentation",
+  "PDF",
+  "image",
+  "video",
+  "repository",
+  "website",
+  "desktop",
+  "UI",
+  "平台",
+  "账户",
+  "浏览器",
+  "窗口",
+  "终端",
+  "控制台",
+  "文档",
+  "表格",
+  "演示",
+  "图片",
+  "视频",
+  "仓库",
+  "网站",
+  "桌面",
+  "界面",
+]
+state = [
+  "opened",
+  "current",
+  "active",
+  "logged in",
+  "registered",
+  "configured",
+  "installed",
+  "已打开",
+  "当前",
+  "正在使用",
+  "已登录",
+  "已注册",
+  "已配置",
+  "已安装",
+]
 
 [router_decision_contract.reflexive_gap_contract]
 enabled = true
@@ -843,6 +998,7 @@ next_action_values = [
   "write_selected_memory_lane",
   "resolve_conversation_link",
   "bind_claim_evidence_boundary",
+  "bind_verified_facts",
   "review_projectization_boundary",
   "apply_edit_operation_profile",
   "load_project_context",
@@ -861,13 +1017,14 @@ completion_evidence_values = [
   "engineering_execution_profile_receipt",
   "verified_postcondition_or_calibration",
   "source_ledger_or_citations",
-  "checked_available_missing_or_blocked",
+  "checked_runtime_capability_status",
   "skill_active_frame",
   "skill_release_receipt",
   "skill_resume_receipt",
   "written_record_or_artifact_path",
   "resolved_link_decision",
   "claim_schema_or_bounded_wording",
+  "canonical_fact_binding_receipt",
   "project_lane_decision",
   "targeted_diff_or_artifact",
   "project_rules_loaded",
@@ -886,13 +1043,13 @@ scoped_confirmation_required_fields = [
   "non_targets",
 ]
 authorization_persistence = "none"
-rule = "Convert action-changing route decisions into the existing receipt. Retrieved prevention or reuse records become task-local candidate predictions, never standing constraints: review applicability, choose a candidate safe form only when relevant, observe the current-task outcome, then retire the review. The configured prediction/action counts are soft fast-path targets, never capability caps. Safety, lane, permission, claim, evidence, and correctness requirements outrank context cost. Deterministic runtime guards remain separate. Partition large transport payloads without semantic loss. A binding is complete only when coverage is sufficient or unresolved facets are explicit and its named completion evidence exists."
+rule = "Convert action-changing route decisions into the existing receipt. Retrieved prevention or reuse records become task-local candidate predictions, never standing constraints: review applicability, choose a candidate safe form only when relevant, observe the current-task outcome, then retire the review. Mechanically verified closed facts may enter the separate bind_verified_facts phase only with source refs, verification boundaries, conflict_status=none, a registered non-model producer receipt whose value hash matches, explicit consumers, and exact typed targets or answer slots; control facts are late-bound rather than rewritten by the model, while model_context and audit_only remain separate channels. The configured prediction/action counts are soft fast-path targets, never capability caps. Safety, lane, permission, claim, evidence, and correctness requirements outrank context cost. Deterministic runtime guards remain separate. Partition large transport payloads without semantic loss. A binding is complete only when coverage is sufficient or unresolved facets are explicit and its named completion evidence exists."
 
 [router_decision_contract.task_continuity_contract]
 enabled = true
 schema = "cbh.task_continuity_contract.v1"
 lifecycle_values = ["DORMANT", "ARMED", "ACTIVE", "VERIFYING", "RETIRED"]
-decision_values = ["dormant", "arm", "continue"]
+decision_values = ["dormant", "observe_once", "arm", "continue"]
 activation_reasons = [
   "write_intent",
   "tool_required",
@@ -903,13 +1060,14 @@ activation_reasons = [
   "prior_failure",
   "explicit_request",
   "existing_active_capsule",
+  "plan_observed",
 ]
 progress_status_values = ["verified", "inferred", "unknown"]
 short_answer_default = "dormant"
-write_intent_requires_arm = true
-state_storage = "process_local_only"
+write_intent_requires_arm = false
+state_storage = "persistent_tasks_local_cumcwork_only"
 authority_granted = false
-rule = "CBH remains active. Only the task-continuity layer sleeps by default. Arm it for write, tool, long-running, multi-stage, or resumed work; keep ordinary answer-only turns dormant. Track observable objective, progress, earliest incomplete acceptance item, next action, failures, verifier state, and bounded evidence references. Do not store chain-of-thought, create permission, or create a separate task-memory file. Retire only after required postconditions are verified or unresolved work is explicitly reported."
+rule = "CBH remains active. The persistent task-continuity layer sleeps by default. Use observe_once for a short write or single tool action so pre-action attention remains available without a cross-turn workfile. Arm persistent continuity only for a non-empty objective with a multi-step plan, explicit long-running/open-loop/continuation request, prior failure that must resume, or an existing active capsule. Track plan steps separately from acceptance evidence, continue from the earliest incomplete plan step, and retire only after the plan and required postconditions are complete or unresolved work is explicitly reported. Do not store chain-of-thought or create permission."
 
 [router_decision_contract.engineering_execution_contract]
 enabled = true
@@ -928,48 +1086,10 @@ source_refs = [
 rule = "Activate only the matching advisory profile. Keep ordinary tasks dormant. Tracer-bullet receipts expose a vertical delivery frontier and blocking edges; deep-module probes default to reversible freeze or temporary isolation, require rollback and audit evidence, and retain deletion only as the source thought experiment; invocation topology distinguishes request origin, actual runtime invoker, orchestration owner, and authority; adapter seams remain hypothetical until two independent verified host surfaces exercise the same core contract."
 
 [router_decision_contract.engineering_execution_contract.profile_triggers]
-tracer_bullet_plan = [
-  "tracer bullet",
-  "tracer-bullet",
-  "vertical slice",
-  "纵向 tracer",
-  "纵向切片",
-  "阻塞边图",
-  "blocking edge",
-  "expand migrate contract",
-  "扩展迁移收缩",
-]
-deep_module_review = [
-  "deep module",
-  "深模块",
-  "deletion test",
-  "删除测试",
-  "freeze test",
-  "isolation test",
-  "temporary isolation",
-  "冻结测试",
-  "临时隔离测试",
-  "thin wrapper",
-  "浅包装",
-]
-skill_invocation_topology = [
-  "invocation topology",
-  "调用拓扑",
-  "actual invoker",
-  "实际调用者",
-  "谁调用",
-  "skill invocation",
-  "技能调用",
-]
-adapter_seam_review = [
-  "real seam",
-  "真实 seam",
-  "真实接缝",
-  "adapter seam",
-  "适配器边界",
-  "第二个独立适配器",
-  "two independent adapters",
-]
+tracer_bullet_plan = ["tracer bullet", "tracer-bullet", "vertical slice", "纵向 tracer", "纵向切片", "阻塞边图", "blocking edge", "expand migrate contract", "扩展迁移收缩"]
+deep_module_review = ["deep module", "深模块", "deletion test", "删除测试", "freeze test", "isolation test", "temporary isolation", "冻结测试", "临时隔离测试", "thin wrapper", "浅包装"]
+skill_invocation_topology = ["invocation topology", "调用拓扑", "actual invoker", "实际调用者", "谁调用", "skill invocation", "技能调用"]
+adapter_seam_review = ["real seam", "真实 seam", "真实接缝", "adapter seam", "适配器边界", "第二个独立适配器", "two independent adapters"]
 
 [router_decision_contract.correction_lifecycle_contract]
 enabled = true
@@ -1053,9 +1173,13 @@ rule = "Use trigger groups as a first-pass filter only. The gate should fire onl
 exclusion = "This gate does not decide public/private visibility or release eligibility. Information-boundary decisions remain in the public/private boundary gate."
 
 [router_decision_contract.issue_prevention_gates.exact_anchor_preservation_gate]
-purpose = "Preserve exact identifiers and boundary words in public, release, citation, memory, and handoff surfaces. Do not shorten, normalize, prettify, or repair identifiers from memory."
+purpose = "Preserve exact identifiers and boundary words in external queries, public, release, citation, memory, and handoff surfaces. Query expansion may add variants but must not replace, shorten, normalize, prettify, or repair the original query or exact anchor."
 triggers = [
   "exact anchor",
+  "external query",
+  "project name",
+  "owner/repo",
+  "quoted phrase",
   "version marker",
   "release version",
   "DOI",
@@ -1067,6 +1191,10 @@ triggers = [
   "deployment status",
   "memory lane id",
   "精确锚点",
+  "外部查询",
+  "项目全名",
+  "仓库标识",
+  "引号原文",
   "版本标记",
   "发布版本",
   "提交哈希",
@@ -1140,6 +1268,44 @@ max_candidates = 3
 match_rule = "Resolve only a unique highest-scoring active registry entry from title, aliases, retrieval terms, semantic anchors, or memory id. Ambiguous or missing candidates remain unresolved and do not open payloads."
 completion_rule = "A registry or outer-summary hit is navigation only. For a resolved referenced lane, read its meta, current state, explicit link ledger, and conversation-ledger index in one bounded read-only bundle; follow at most one explicit continuation edge, and open evidence/raw only when exact facts require it."
 
+[router_decision_contract.vague_memory_recall_contract]
+enabled = true
+retrospective_markers = [
+  "remember",
+  "recall",
+  "I only remember",
+  "that incident",
+  "previously",
+  "记得",
+  "只记得",
+  "回忆",
+  "那次",
+  "之前",
+  "上次",
+  "大概",
+]
+incident_markers = [
+  "major incident",
+  "historical incident",
+  "incident",
+  "重大事件",
+  "重大问题",
+  "历史事件",
+  "事故",
+  "事件",
+  "问题",
+  "故障",
+]
+temporal_fragment_patterns = [
+  '(?i)\b20\d{2}[-/](?:0?[1-9]|1[0-2])(?:[-/](?:0?[1-9]|[12]\d|3[01]))?\b',
+  '(?:(?:20\d{2})\s*年)?\s*(?:1[0-2]|0?[1-9])\s*月(?:\s*(?:3[01]|[12]\d|0?[1-9])\s*[日号])?',
+  '(?:十二|十一|十|[一二三四五六七八九])\s*月份?',
+  '(?i)\b(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b',
+]
+max_candidates = 5
+candidate_only_rule = "A temporal fragment, generic incident wording, or one vague semantic facet discovers bounded outer-index candidates only; it never selects an event or opens payload/raw evidence by itself."
+payload_open_rule = "Open paired memory or raw evidence only after an exact stable ID, a strong unique anchor, multiple independent matching facets with a unique lead, or explicit user confirmation of one candidate."
+
 [router_decision_contract.issue_prevention_gates.hallucination_detection_anchor_gate]
 purpose = "When judging whether an answer is hallucinated, complete, grounded, or task-satisfying, require source labels, evidence anchors, requested-output contract, or explicit unsupported/non-answer category."
 triggers = [
@@ -1161,16 +1327,12 @@ triggers = [
 ]
 
 [router_decision_contract.issue_prevention_gates.global_task_context_gate]
-purpose = "Prevent local fixes or useful side findings from displacing the user-approved primary goal. For complex or multi-stage work, keep each substantive stage aligned with the smallest task-relevant architecture, workflow, or evidence boundary; preserve upstream assumptions, downstream consumers, interfaces, invariants, exit evidence, stop conditions, and the split between blocking and deferred findings. Reuse unchanged mappings and remap only after a material trigger, not before every tool call. Engineering depth does not change risk or authorization. A user correction updates the current judgment first; it does not by itself authorize global router or policy edits."
+purpose = "Prevent local fixes or useful side findings from displacing the user-approved primary goal. Preserve upstream goals, active lane, current status, file map, cross-step constraints, stop conditions, and an explicit split between blocking findings and deferred non-blocking findings. A user correction updates the current judgment first; it does not by itself authorize global router or policy edits."
 triggers = [
   "global task view",
   "global perspective",
   "system-wide view",
   "whole task context",
-  "substantive stage boundary",
-  "task-relevant system",
-  "local to global position",
-  "reuse unchanged mapping",
   "local fix caused",
   "local task causal",
   "upstream constraint",
@@ -1199,10 +1361,6 @@ triggers = [
   "系统性问题",
   "整体任务",
   "任务全貌",
-  "实质阶段",
-  "最小相关系统",
-  "局部在整体中的位置",
-  "复用未变化映射",
   "局部因果",
   "后续同类",
   "后续类似",
@@ -1223,130 +1381,6 @@ triggers = [
   "不要继续扩展",
   "停止扩张",
 ]
-
-[router_decision_contract.direct_outcome_first_contract]
-enabled = true
-required_gate = "direct_outcome_first_gate"
-purpose = "Prevent protective scaffolding, generalized abstractions, or systemic refactors from displacing a bounded user-visible outcome. After the minimum necessary read, route the first substantive mutation to the requested surface unless direct failure evidence, objective cross-surface acceptance, safety or data-integrity risk, or explicit user scope requires expansion."
-surface_terms = [
-  "UI",
-  "UX",
-  "frontend",
-  "button",
-  "hover",
-  "modal",
-  "dialog",
-  "tooltip",
-  "form",
-  "layout",
-  "spacing",
-  "interaction",
-  "animation",
-  "前端",
-  "界面",
-  "按钮",
-  "悬停",
-  "弹窗",
-  "对话框",
-  "提示框",
-  "表单",
-  "布局",
-  "间距",
-  "交互",
-  "动效",
-]
-mutation_terms = [
-  "change",
-  "fix",
-  "update",
-  "adjust",
-  "add",
-  "remove",
-  "implement",
-  "modify",
-  "make",
-  "set",
-  "修改",
-  "修复",
-  "更新",
-  "调整",
-  "添加",
-  "增加",
-  "移除",
-  "实现",
-  "改成",
-  "改为",
-]
-non_mutation_intent_terms = [
-  "explain",
-  "explanation",
-  "how does",
-  "principle",
-  "describe",
-  "解释",
-  "说明原理",
-  "实现原理",
-  "工作原理",
-  "为什么",
-]
-bounded_scope_terms = [
-  "this",
-  "only",
-  "just",
-  "small",
-  "simple",
-  "one-off",
-  "local",
-  "direct",
-  "这个",
-  "只",
-  "仅",
-  "简单",
-  "一次性",
-  "局部",
-  "直接",
-]
-explicit_systemic_scope_terms = [
-  "entire UI architecture",
-  "system-wide UI",
-  "design system",
-  "component library",
-  "reusable framework",
-  "cross-application",
-  "global refactor",
-  "refactor the entire",
-  "整个 UI 架构",
-  "系统性 UI",
-  "全局 UI",
-  "设计系统",
-  "组件库",
-  "通用框架",
-  "跨应用",
-  "全局重构",
-  "重构整个",
-]
-proxy_artifact_terms = [
-  "protective mechanism",
-  "guardrail first",
-  "schema first",
-  "framework first",
-  "policy first",
-  "abstraction first",
-  "保护机制",
-  "先建保护",
-  "先建 schema",
-  "先建框架",
-  "先改 policy",
-  "先做抽象",
-]
-first_mutation_rule = "After the minimum necessary read, the first substantive mutation must directly affect the user-requested surface. Proxy artifacts remain deferred unless they are necessary evidence or a blocking prerequisite for acceptance, safety, or data integrity."
-expansion_allowed_only_if = [
-  "direct implementation failed with reviewable evidence",
-  "acceptance objectively spans multiple surfaces",
-  "safety or data integrity blocks the direct path",
-  "the user explicitly requested systemic or reusable scope",
-]
-retire_condition = "Retire after the direct result passes acceptance, or after evidence proves that one declared expansion condition applies."
 
 [router_decision_contract.issue_prevention_gates.novel_recurrence_candidate_gate]
 purpose = "Lightweight re-evaluation for novel-looking failures that resemble prior failure shapes without matching a known gate. Mark a candidate recurrence or candidate global issue first; do not automatically run global, causal, feedback, memory-write, or R5 paths unless the re-evaluation upgrades the scope."
@@ -1713,24 +1747,24 @@ scope_limiter_terms = [
 ]
 
 [router_decision_contract.conversation_memory_full_lane_triggers]
-decision_rule = "Create or update the active conversation memory lane when an explicit conversation-memory request is present, or when any threshold group crosses its threshold in a non-read-only task. Keep conversation_memory_threshold as a backward-compatible coarse fallback."
+decision_rule = "Create or update the active conversation memory lane when an explicit conversation-memory request is present, or when any threshold group crosses its threshold in a non-read-only task. A compaction/context-loss signal must describe an observed event or an explicit recovery request; discussion of token cost, context-window size, or compaction behavior alone does not cross this threshold. Keep conversation_memory_threshold as a backward-compatible coarse fallback."
 
 [router_decision_contract.conversation_memory_full_lane_triggers.threshold_groups.compaction_or_context_loss]
 threshold = 1
 triggers = [
-  "context compression",
-  "context compaction",
-  "compressed context",
-  "context loss",
+  "context was compacted",
+  "context has been compacted",
+  "resume after compaction",
+  "recover context",
+  "restore context",
   "lost context",
-  "token pressure",
-  "token budget",
-  "上下文压缩",
+  "context is missing",
+  "上下文已压缩",
   "上下文丢失",
   "上下文缺失",
-  "压缩后",
-  "token消耗",
-  "上下文窗口",
+  "压缩后继续",
+  "恢复上下文",
+  "找回上下文",
 ]
 
 [router_decision_contract.conversation_memory_full_lane_triggers.threshold_groups.durable_decision]
@@ -1827,6 +1861,8 @@ triggers = [
   "release date",
   "official fact",
   "official source",
+  "Claude",
+  "Anthropic",
   "官方",
   "官方事实",
   "官方来源",
@@ -1975,7 +2011,6 @@ local_memory_access_intent_terms = [
   "recall",
   "remember",
   "from memory",
-  "our memory",
   "memory index",
   "_META_INDEX",
   "ERR-",
@@ -1984,7 +2019,6 @@ local_memory_access_intent_terms = [
   "记忆中",
   "查记忆",
   "从记忆",
-  "我们的记忆",
   "元摘要",
   "之前",
 ]
@@ -2282,7 +2316,7 @@ enabled = true
 schema = "cbh.behavior_correction_contract.v1"
 profile_registry_path = "behavior_correction_profiles.json"
 profile_registry_schema = "cbh.behavior_correction_profile_registry.v1"
-profile_registry_sha256 = "84e484edf24882d9c0b64374e846fcd86940b029ba22e3965eef5fa096da0a90"
+profile_registry_sha256 = "f43aeeb6ec6b1e68a89284fe4010bc869e576ea22ebbfa1de0cfe98a3e20d4f9"
 registry_hash_algorithm = "sha256_raw_file_bytes"
 profile_hash_algorithm = "sha256_canonical_json_profile"
 profile_priority_rule = "descending_unique_integer_then_profile_id"
@@ -2393,10 +2427,9 @@ hook_event = "PreToolUse"
 tool_name_matcher = "^Bash$"
 covered_host_tool_surface = "native_tool_name_Bash_only"
 known_uncovered_tool_surfaces = [
-  "functions.exec_nested_shell_command",
-  "shell_text_nested_in_other_orchestration_tools",
+  "nested_orchestration_dispatch_not_observed_as_host_Bash",
 ]
-uncovered_surface_fallback = "one_direct_pretool_gate_call_for_a_mechanically_selected_known_recurrence_then_agent_applies_only_a_verified_current_event_rewrite; no_match_or_ambiguity_is_noop"
+uncovered_surface_fallback = "one_direct_pretool_gate_call_only_when_the_selected_nested_dispatch_does_not_reach_the_host_Bash_hook_and_a_known_mechanical_recurrence_matches; no_match_or_ambiguity_is_noop"
 output_contract = "allow_updated_input_only"
 accepted_profile_enforcement = "rewrite_current_event_nonblocking"
 rewrite_handler_allowlist = [
@@ -2410,7 +2443,7 @@ automatic_policy_mutation = false
 rule = "Accepted deterministic profiles may transparently rewrite only the current native Bash tool input after exact binding and real-parser verification. Uncovered nested shell surfaces use at most one direct pretool advisory evaluation for a known recurrence and remain agent-owned. The hook and fallback never deny, persist state, write memory, mutate policy, or grant authority."
 
 [runtime_enforcement.behavior_correction_contract.posttool_exact_readback]
-required = true
+required = false
 required_for_verifier_channels = [
   "tool_input_and_exact_target_readback",
 ]
@@ -2418,4 +2451,4 @@ maximum_targets = 16
 maximum_total_bytes = 4194304
 encoding = "utf-8-sig-strict"
 outcome_requirement = "no_failure_observed"
-unavailable_behavior = "keep_capsule_active"
+unavailable_behavior = "agent_reports_verification_debt"

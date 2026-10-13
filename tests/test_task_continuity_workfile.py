@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -11,8 +12,8 @@ from pathlib import Path
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-HARNESS = ROOT / "skills" / "embedded-harness"
+ROOT = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
+HARNESS = ROOT
 if str(HARNESS) not in sys.path:
     sys.path.insert(0, str(HARNESS))
 
@@ -111,8 +112,98 @@ def test_snapshot_commit_is_canonical_utf8_and_forms_a_strict_head_chain(tmp_pat
     assert restored["work_revision"] == 2
     assert restored["head_sha256"] == second["head_sha256"]
     assert restored["active_capsule"] == second_capsule
+    assert restored["active_capsule"]["persistence_scope"] == "turn_local"
     assert restored["focus"]["objective"] == "实现可靠的短期连续记忆"
     assert restored["focus"]["current_action"]["text"] == "读取当前实现"
+
+
+def test_empty_objective_workfile_is_append_only_retired_before_new_turn(tmp_path: Path) -> None:
+    workfile = load_workfile_module()
+    path = tmp_path / "polluted-empty-objective.cumcwork"
+    polluted = capsule("临时有效目标")
+    polluted["objective"] = ""
+    polluted["global_goal_anchor"]["objective"] = ""
+    polluted["global_goal_anchor"]["objective_sha256"] = hashlib.sha256(b"").hexdigest()
+    polluted["activation_reasons"] = ["tool_required"]
+    polluted["acceptance_criteria"] = [
+        {
+            "id": "tool_result_observed",
+            "text": "required tool result is observed and checked",
+            "status": "unknown",
+        }
+    ]
+    polluted["remaining_work"] = list(polluted["acceptance_criteria"])
+    polluted["next_action"] = "required tool result is observed and checked"
+    polluted["last_event"] = {
+        "event_id": "host:polluted-stage-exit",
+        "type": "stage_exit",
+        "observed_at": "2026-08-25T01:58:55Z",
+    }
+    workfile.append_cumcwork_snapshot(
+        path,
+        polluted,
+        expected_head_sha256=None,
+        expected_work_revision=0,
+    )
+
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": {
+                "edit_operation_profile": "read_only",
+                "memory_mode": "none",
+                "tool_surface_need": "none",
+                "action_bindings": [],
+            },
+            "task_event": task_event(
+                "polluted:next-turn",
+                "task_observed",
+                objective="解释一个短问题",
+            ),
+            "capsule": None,
+            "workfile": {"path": str(path)},
+        }
+    )
+    restored = workfile.rehydrate_cumcwork(
+        path,
+        expected_host_task_key_sha256=polluted["host_task_key_sha256"],
+    )
+
+    assert response["capsule"] is None
+    assert response["workfile_recovery"]["status"] == "retired_invalid_empty_objective"
+    assert restored["work_revision"] == 2
+    assert restored["active_capsule"] is None
+    assert restored["latest_capsule"]["lifecycle"] == "RETIRED"
+    assert restored["latest_capsule"]["retirement"]["reason"] == "invalid_empty_objective"
+
+
+def test_observe_once_with_workfile_has_no_persistent_locator(tmp_path: Path) -> None:
+    work_path = tmp_path / "observe-once.cumcwork"
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": {
+                "edit_operation_profile": "none",
+                "memory_mode": "none",
+                "tool_surface_need": "none",
+                "action_bindings": [],
+            },
+            "task_event": task_event(
+                "observe-once:turn",
+                "task_observed",
+                objective="检查一个文件并告诉我结果",
+            ),
+            "capsule": None,
+            "workfile": {"path": str(work_path)},
+        }
+    )
+
+    assert response["decision"]["decision"] == "observe_once"
+    assert response["persistence"] == "turn_local"
+    assert "workfile_receipt" not in response
+    assert "workfile_handle" not in response
+    assert response["additional_context_entries"].get("workfile") is None
+    assert not work_path.exists()
 
 
 def test_workfile_preserves_context_epoch_and_private_workspace_anchor(tmp_path: Path) -> None:
@@ -174,6 +265,7 @@ def test_rehydrate_marks_unexpected_workspace_drift_before_reusing_progress(tmp_
                 "drift:start",
                 "task_observed",
                 objective="恢复后继续验证当前任务",
+                multi_stage=True,
                 workspace_anchor=first_anchor,
             ),
             "capsule": None,
@@ -441,7 +533,7 @@ def test_persisted_snapshot_drops_raw_payload_and_cannot_grant_authority(tmp_pat
     }
 
 
-def test_worker_once_rehydrates_the_same_working_set_after_process_restart(tmp_path: Path) -> None:
+def test_worker_restart_rehydrates_but_does_not_bind_a_new_user_turn(tmp_path: Path) -> None:
     load_workfile_module()
     work_path = tmp_path / "restart.cumcwork"
     script = HARNESS / "task_continuity.py"
@@ -454,6 +546,7 @@ def test_worker_once_rehydrates_the_same_working_set_after_process_restart(tmp_p
             "task_observed",
             objective="实现并验证可恢复工作记忆",
             intent_kind="new_task",
+            continuity_requested=True,
         ),
         "capsule": None,
         "workfile": {"path": str(work_path)},
@@ -476,6 +569,7 @@ def test_worker_once_rehydrates_the_same_working_set_after_process_restart(tmp_p
     assert first["additional_context_entries"]["workfile"]["kind"] == "untrusted"
     assert "memory_runtime_bridge.py" in first["additional_context_entries"]["workfile"]["value"]
 
+    source_text = "把两个新问题交给另一个模型研究"
     second_request = {
         "id": "restart:2",
         "op": "observe",
@@ -483,8 +577,18 @@ def test_worker_once_rehydrates_the_same_working_set_after_process_restart(tmp_p
         "task_event": task_event(
             "restart:continue",
             "task_observed",
-            objective="继续",
-            intent_kind="continue_ack",
+            objective=source_text,
+            intent_kind="new_task",
+            intent_source="explicit_marker",
+            event_origin="current_user_input",
+            binding_required=False,
+            source_units=[
+                {
+                    "id": "restart:continue:user-request",
+                    "source_role": "current_user_request",
+                    "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                }
+            ],
         ),
         "capsule": None,
         "workfile": {"path": str(work_path)},
@@ -501,108 +605,19 @@ def test_worker_once_rehydrates_the_same_working_set_after_process_restart(tmp_p
     second = json.loads(second_process.stdout)["result"]
     assert second["capsule"]["capsule_id"] == first["capsule"]["capsule_id"]
     assert second["capsule"]["objective"] == "实现并验证可恢复工作记忆"
-    assert second["capsule"]["last_user_delta"]["kind"] == "continue_ack"
-    assert second["workfile_receipt"]["work_revision"] == 2
-
-
-def test_legacy_chain_projects_once_and_restores_global_goal_before_relation(tmp_path: Path) -> None:
-    workfile = load_workfile_module()
-    work_path = tmp_path / "legacy-project.cumcwork"
-    root = capsule("完成长期项目的整体目标")
-    root["state_version"] = 2
-    for key in (
-        "global_goal_anchor",
-        "active_local_delta",
-        "turn_relation",
-        "suspended_task_stack",
-        "reuse_candidates",
-        "legacy_projection",
-    ):
-        root.pop(key, None)
-    first = workfile.append_cumcwork_snapshot(
+    assert second["decision"]["decision"] == "safe_readonly"
+    assert second["transition"]["changed"] is False
+    assert second["persistence"] == "none"
+    assert "workfile_receipt" not in second
+    restored = load_workfile_module().rehydrate_cumcwork(
         work_path,
-        root,
-        expected_head_sha256=None,
-        expected_work_revision=0,
+        expected_host_task_key_sha256=first["capsule"]["host_task_key_sha256"],
     )
-    local = capsule("不对，原需求不是局部目标而是保持长期整体目标")
-    local["state_version"] = 2
-    local["supersedes_capsule_id"] = root["capsule_id"]
-    for key in (
-        "global_goal_anchor",
-        "active_local_delta",
-        "turn_relation",
-        "suspended_task_stack",
-        "reuse_candidates",
-        "legacy_projection",
-    ):
-        local.pop(key, None)
-    workfile.append_cumcwork_snapshot(
-        work_path,
-        local,
-        expected_head_sha256=first["head_sha256"],
-        expected_work_revision=1,
-    )
-    legacy_prefix = work_path.read_bytes()
-
-    response = process_worker_request(
-        {
-            "op": "observe",
-            "route_receipt": route(),
-            "task_event": task_event(
-                "legacy:continue",
-                "task_observed",
-                objective="其他的呢",
-                intent_kind="ambiguous",
-                intent_confidence="low",
-                intent_source="fallback",
-            ),
-            "capsule": None,
-            "workfile": {"path": str(work_path)},
-        }
-    )
-
-    assert work_path.read_bytes().startswith(legacy_prefix)
-    projected = response["capsule"]
-    assert projected["state_version"] == 3
-    assert projected["global_goal_anchor"]["objective"] == "完成长期项目的整体目标"
-    assert projected["goal_deltas"] == [
-        {
-            "kind": "correction",
-            "text": "不对，原需求不是局部目标而是保持长期整体目标",
-            "source_ref": f"legacy_capsule:{local['capsule_id']}",
-        }
-    ]
-    assert projected["active_local_delta"]["turn_ref"] == "legacy:continue"
-    assert projected["legacy_projection"]["source_head_sha256"]
-    assert projected["legacy_projection"]["projected_capsule_ids"] == [
-        root["capsule_id"],
-        local["capsule_id"],
-    ]
-    assert response["workfile_receipt"]["work_revision"] == 3
-
-    before_replay = work_path.read_bytes()
-    replay = process_worker_request(
-        {
-            "op": "observe",
-            "route_receipt": route(),
-            "task_event": task_event(
-                "legacy:continue",
-                "task_observed",
-                objective="其他的呢",
-                intent_kind="ambiguous",
-                intent_confidence="low",
-                intent_source="fallback",
-            ),
-            "capsule": None,
-            "workfile": {"path": str(work_path)},
-        }
-    )
-    assert work_path.read_bytes() == before_replay
-    assert replay["workfile_receipt"]["changed"] is False
+    assert restored["work_revision"] == 1
+    assert restored["active_capsule"] == first["capsule"]
 
 
-def test_explicit_new_task_supersedes_active_capsule_in_the_same_workfile(tmp_path: Path) -> None:
+def test_explicit_new_task_marker_cannot_supersede_workfile_without_receipt(tmp_path: Path) -> None:
     load_workfile_module()
     work_path = tmp_path / "switch.cumcwork"
     script = HARNESS / "task_continuity.py"
@@ -616,6 +631,7 @@ def test_explicit_new_task_supersedes_active_capsule_in_the_same_workfile(tmp_pa
                 "task_observed",
                 objective="修复旧 R5 路由",
                 intent_kind="new_task",
+                continuity_requested=True,
             ),
             "capsule": None,
             "workfile": {"path": str(work_path)},
@@ -632,6 +648,17 @@ def test_explicit_new_task_supersedes_active_capsule_in_the_same_workfile(tmp_pa
                 intent_confidence="high",
                 intent_source="explicit_marker",
                 intent_reason_codes=["explicit_global_replacement"],
+                event_origin="current_user_input",
+                binding_required=False,
+                source_units=[
+                    {
+                        "id": "switch:new:user-request",
+                        "source_role": "current_user_request",
+                        "text_sha256": hashlib.sha256(
+                            "实现可恢复的短期连续记忆".encode("utf-8")
+                        ).hexdigest(),
+                    }
+                ],
             ),
             "capsule": None,
             "workfile": {"path": str(work_path)},
@@ -653,7 +680,8 @@ def test_explicit_new_task_supersedes_active_capsule_in_the_same_workfile(tmp_pa
     old = results[0]["result"]["capsule"]
     assert "error" not in results[1], results[1]
     new = results[1]["result"]["capsule"]
-    assert new["capsule_id"] != old["capsule_id"]
-    assert new["supersedes_capsule_id"] == old["capsule_id"]
-    assert new["objective"] == "实现可恢复的短期连续记忆"
-    assert results[1]["result"]["workfile_receipt"]["work_revision"] == 2
+    assert new["capsule_id"] == old["capsule_id"]
+    assert new["objective"] == old["objective"]
+    assert results[1]["result"]["decision"]["decision"] == "safe_readonly"
+    assert results[1]["result"]["persistence"] == "none"
+    assert "workfile_receipt" not in results[1]["result"]

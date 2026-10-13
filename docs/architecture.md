@@ -48,7 +48,10 @@ routing receipt (including optional task_continuity_decision)
 -> selective hard runtime gate only for critical risks
 ```
 
-The control plane decides whether to use project instructions, a project router, memory retrieval, existing skills/tools/plugins, external research, claim checks, or human confirmation. It should not expand into every memory, every skill, or every tool call by default.
+The host model decides whether the current task needs project instructions,
+memory, skills, tools, external evidence or missing authorization. ACCF offers
+optional navigation, state and mechanical receipts for those choices. It does
+not require a routing receipt for every task or expand into every available source.
 
 For a protected high-risk action, the control plane is an execution-state gate:
 without exact current human authorization, the model must stop before forming
@@ -57,10 +60,9 @@ host-enforced execution stop. The latter requires a tested hook, proxy,
 permission system, sandbox, or operating-system boundary that can reject the
 action independently of model compliance.
 
-Authorization is one-event, one-declared-scope, and one-use. A later, repeated,
-expanded, or materially changed risky action must enter the gate again. The
-operator accepts the disclosed decision risk for the exact authorized action;
-ACCF does not certify it as safe or assume responsibility for its consequences.
+Authorization follows the agreed task scope and remains valid while that scope
+and its effects remain unchanged. Routing and skill boundaries do not consume
+it. New external effects or irreversible operations require their own authorization.
 
 ## Hook Capture Point Matrix
 

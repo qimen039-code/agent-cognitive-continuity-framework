@@ -2,8 +2,20 @@
 
 # Agent Cognitive Continuity Framework
 
-[![Smoke checks](https://github.com/qimen039-code/claim-boundary-harness/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/qimen039-code/claim-boundary-harness/actions/workflows/smoke.yml)
+[![Smoke checks](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml)
 [![Zenodo concept DOI](./docs/assets/doi-badge.svg)](https://doi.org/10.5281/zenodo.21189879)
+
+## 当前维护更新
+
+授权按用户明确任务范围和宿主权限生效。路由、技能和阶段切换不消耗既有授权，
+也不重新制造审批。框架字段与 Hook 不授予权限。
+
+通用来源读取器提供 index/search/outline/read、原始范围、分片索引和上下文展开；
+v3 记忆读取将元数据发现与精确正文展开分开。可选上下文召回只读取受配置约束的
+原生记忆和公开消息，排除不透明推理状态，将可识别的历史错误材料保留为诊断导航。
+详见 [上下文召回](docs/context-recall.md)、[来源读取技能](skills/text-source-reader/SKILL.md)
+和 [能力缺口查询技能](skills/capability-router/SKILL.md)。这些入口需要真实消费者，
+不表示新宿主已自动激活，也不证明开放语义完整性或模型总成本更低。
 
 ## 30 秒看懂
 
@@ -61,7 +73,7 @@ Codex 能读取工作区指令并运行本地工具，就可以在目标任务�
 新建任务、给它一个可访问的本地工作区，然后把下面这一整行直接发给它：
 
 ```text
-请将 https://github.com/qimen039-code/claim-boundary-harness 默认 main 分支的最新 Agent Cognitive Continuity Framework 部署到当前编码 Agent 环境：先阅读 docs/agent-deployment-map.md；检查当前宿主真实存在的指令、Skill、Command、Hook、模型循环、权限与沙箱接口；列出精确写入目标并备份现有配置；选择一个完整的声明式部署 profile，生成并保留其全部依赖闭包；取得必要授权后，只对宿主确实支持的表面进行本地适配；使用公开模板初始化私有本地 overlay，不得公开本机路径或记忆；运行编译器、验证器、doctor、相关 profile 测试和一次新任务生命周期 smoke；最后返回包含 checked_available、checked_missing、checked_blocked 的部署回执，且不得把“文件已复制”说成“能力已激活”。
+请将 https://github.com/qimen039-code/agent-cognitive-continuity-framework 默认 main 分支的最新 Agent Cognitive Continuity Framework 部署到当前编码 Agent 环境：先阅读 docs/agent-deployment-map.md；检查当前宿主真实存在的指令、Skill、Command、Hook、模型循环、权限与沙箱接口；列出精确写入目标并备份现有配置；选择一个完整的声明式部署 profile，生成并保留其全部依赖闭包；取得必要授权后，只对宿主确实支持的表面进行本地适配；使用公开模板初始化私有本地 overlay，不得公开本机路径或记忆；运行编译器、验证器、doctor、相关 profile 测试和一次新任务生命周期 smoke；最后返回包含 checked_available、checked_missing、checked_blocked 的部署回执，且不得把“文件已复制”说成“能力已激活”。
 ```
 
 该任务会先检查当前安装的指令文件、Skill 注册、Hook、权限系统、沙箱和工具生命周期，
@@ -86,12 +98,12 @@ Codex 能读取工作区指令并运行本地工具，就可以在目标任务�
 - 宿主不支持的能力应标记为 `checked_missing` 或 `checked_blocked`，不能静默宣称启用。
 - 客户端、Hook 协议或相关配置更新后，需要重新运行本地兼容性检查。
 
-当前 main 分支版本：`v1.2.7`。
-最新已打 tag 的 GitHub Release：[`v1.2.7`](https://github.com/qimen039-code/claim-boundary-harness/releases/tag/v1.2.7)。
+当前 main 分支版本：`v1.2.8`。
+最新已打 tag 的 GitHub Release：[`v1.2.8`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/tag/v1.2.8)。
 外部查询当前版本时，应同时核对默认分支 `VERSION` 与 GitHub
-[`releases/latest`](https://github.com/qimen039-code/claim-boundary-harness/releases/latest)，
+[`releases/latest`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/latest)，
 二者必须指向同一版本。
-公开仓库只保留最新 Release/tag。更早版本由提交历史和 CHANGELOG 保留；
+历史 Release/tag 默认保留，删除它们需要相应的明确授权。更早版本也由提交历史和 CHANGELOG 保留；
 已删除的历史 tag 链接不是安装、能力或兼容性依据。
 
 > **现行版本检索注释：** 框架当前状态以默认 `main` 分支的最新提交为准，
@@ -140,10 +152,9 @@ ACCF 不是：
 - **宿主执行时硬拦截：** Hook、代理、权限系统、沙箱或操作系统在模型之外拒绝工具
   调用。ACCF 只对已经真实接入并通过阻断测试的路径声明这种能力。
 
-人工授权只绑定一个具体事件、一个声明范围和一次使用；该次操作消费授权，后续不同或
-实质变化的危险动作必须重新停止并请求授权。人工在看到风险后授权精确操作，表示人工
-接管该次风险决定；ACCF 记录授权边界，但不把该操作认证为安全，也不对该次已授权危险
-操作的后果作安全担保。Agent 仍必须严格限制在授权范围内，并回报实际结果。
+人工授权在已确认的任务范围内持续有效；路由、技能和阶段变化不消耗它。
+新外部影响或不可恢复操作需要相应授权。框架不把授权认证为安全保证；Agent
+仍须限制在授权范围内，并以实际结果和证据交付。
 
 ## 技术概览（面向开发者和 Agent）
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stateless, nonblocking behavior-correction reference hook.
+"""Stateless, nonblocking behavior-correction migration hook for Codex.
 
 Only accepted deterministic profiles may rewrite the current Bash tool input.
 No profile match, ambiguity, verifier failure, or runtime error leaves the

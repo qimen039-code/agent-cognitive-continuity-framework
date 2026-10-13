@@ -68,13 +68,13 @@ def test_bilingual_readme_and_local_overlay_template_are_present() -> None:
 
     assert "[中文版](./README_zh.md) | English" in readme
     assert "[English](./README.md) | 中文" in readme_zh
-    assert "Current main-branch version: `v1.2.7`." in readme
-    assert "当前 main 分支版本：`v1.2.7`。" in readme_zh
-    assert "Latest tagged GitHub release: [`v1.2.7`]" in readme
-    assert "最新已打 tag 的 GitHub Release：[`v1.2.7`]" in readme_zh
+    assert "Current main-branch version: `v1.2.8`." in readme
+    assert "当前 main 分支版本：`v1.2.8`。" in readme_zh
+    assert "Latest tagged GitHub release: [`v1.2.8`]" in readme
+    assert "最新已打 tag 的 GitHub Release：[`v1.2.8`]" in readme_zh
     assert "releases/latest" in readme
     assert "releases/latest" in readme_zh
-    assert read_text("VERSION").strip() == "v1.2.7"
+    assert read_text("VERSION").strip() == "v1.2.8"
     assert overlay["schema"] == "cbh.project_lane_overlay.v1"
     assert policy["local_project_lane_overlay"]["default_filename"] == "embedded_harness_policy.local.json"
     assert "embedded_harness_policy.local.json" in readme
@@ -107,27 +107,15 @@ def test_public_docs_describe_current_nonblocking_runtime_and_existing_minimal_p
     assert "把这个包复制到目标 workspace" not in readme_zh
 
 
-def test_public_docs_separate_model_pre_action_stop_from_host_enforcement() -> None:
-    readme = read_text("README.md")
-    readme_zh = read_text("README_zh.md")
-    agents = read_text("AGENTS.md")
-    architecture = read_text("docs/architecture.md")
-    router_contract = read_text("docs/router-decision-contract.md")
-    test_cases = read_text("docs/test-cases.md")
+def test_public_docs_preserve_task_authorization_and_host_enforcement() -> None:
     policy = json.loads(read_text("skills/embedded-harness/embedded_harness_policy.json"))
-
-    for text in (readme, agents, architecture, router_contract):
-        assert "model-layer pre-action" in text
-        assert "one" in text and "scope" in text and "use" in text
-    assert "模型层执行前停止" in readme_zh
-    assert "一个具体事件、一个声明范围和一次使用" in readme_zh
-    assert "certify the action as safe" in readme
-    assert "TC-044a" in test_cases
-    assert "TC-044b" in test_cases
-    boundary = policy["gate_enforcement_boundary"]
-    assert "mandatory model-layer pre-action stops" in boundary
-    assert "does not extend to later or materially changed risky actions" in boundary
-    assert "host-enforced execution blocking" in boundary
+    assert "Task-scoped authorization remains valid" in policy["gate_enforcement_boundary"]
+    assert "Host-enforced execution blocking" in policy["gate_enforcement_boundary"]
+    agents = read_text("AGENTS.md")
+    assert "Existing authorization remains valid" in agents
+    assert "approval" in agents and "does not consume it" in agents
+    for name in ("README.md", "README_zh.md"):
+        assert "skills/text-source-reader/SKILL.md" in read_text(name)
 
 
 def test_citation_notice_are_visible_and_public_report_draft_is_absent() -> None:
@@ -154,8 +142,7 @@ def test_citation_notice_are_visible_and_public_report_draft_is_absent() -> None
     assert "10.5281/zenodo.21189879" in readme
     assert "./docs/assets/doi-badge.svg" in readme
     assert "Latest tagged GitHub release:" in readme
-    assert "The public repository retains only the latest release/tag" in readme
-    assert "公开仓库只保留最新 Release/tag" in readme_zh
+    assert "Historical releases and tags remain" in readme
     assert "claim-boundary-harness-technical-report.md" not in readme
     assert "CITATION.cff" in readme_zh
     assert "NOTICE.md" in readme_zh
@@ -166,8 +153,8 @@ def test_citation_notice_are_visible_and_public_report_draft_is_absent() -> None
     assert "claim-boundary-harness-technical-report.md" not in readme_zh
     assert "title: \"Agent Cognitive Continuity Framework: Memory, Execution-State, and Attention Continuity for LLM Agent Workflows\"" in citation
     assert "qimen039-code" in citation
-    assert "version: \"1.2.7\"" in citation
-    assert "date-released: \"2026-08-24\"" in citation
+    assert "version: \"1.2.8\"" in citation
+    assert "date-released: \"2026-10-13\"" in citation
     assert "doi: \"10.5281/zenodo.21189879\"" in citation
     assert "10.5281/zenodo.21189879" in doi_badge
     assert 'role="img"' in doi_badge
@@ -178,11 +165,11 @@ def test_citation_notice_are_visible_and_public_report_draft_is_absent() -> None
     assert "## v1.0.0 - 2026-07-20" in changelog
     stale_version = "v0." + "14.0"
     assert stale_version not in changelog
-    assert manifest["harness_version"] == "v1.2.7"
-    assert "## v1.2.7 - 2026-08-24" in changelog
+    assert manifest["harness_version"] == "v1.2.8"
+    assert "## v1.2.8 - 2026-10-13" in changelog
     agents = read_text("AGENTS.md")
-    assert "an explicit version update is incomplete" in agents
-    assert "GitHub `releases/latest` API agree" in agents
+    assert "An explicit version-update task includes" in agents
+    assert "latest Release afterwards" in agents
     assert "mandatory model-layer pre-action stops" in changelog
     planner = manifest["external_retrieval_planner"]
     assert planner["receipt_schema"] == "cbh.external_retrieval_receipt.v1"
@@ -280,7 +267,7 @@ def test_memory_profiles_are_routed_and_template_visible() -> None:
     assert "task_continuity" in policy["router_decision_contract"]["module_need_values"]
     continuity = policy["router_decision_contract"]["task_continuity_contract"]
     assert continuity["schema"] == "cbh.task_continuity_contract.v1"
-    assert continuity["state_storage"] == "process_local_only"
+    assert continuity["state_storage"] == "persistent_tasks_local_cumcwork_only"
     action_contract = policy["router_decision_contract"]["action_binding_contract"]
     assert "prepare_task_continuity_capsule" in action_contract["next_action_values"]
     assert "task_continuity_capsule_or_dormant_receipt" in action_contract[
@@ -370,7 +357,9 @@ def test_external_learning_and_exposed_capability_short_circuit_are_bounded() ->
     router = read_text("docs/router-decision-contract.md")
     memory_writes = read_text("docs/memory-write-granularity-contract.md")
 
-    for text in (agents, router):
+    assert "Use an exposed tool that covers the next action" in agents
+    assert "Historical error records are diagnostic evidence" in agents
+    for text in (router,):
         assert "resolved_current_exposure" in text
         assert "unchanged exposure state" in text
         assert "adapted_mechanism" in text

@@ -3,5 +3,6 @@
   "updated_at": null,
   "scope": "adopter_local_runtime_registry",
   "rule": "Keep only active, paused, or checkpoint-candidate conversation lane heads here. Runtime data remains local to the adopter.",
-  "entries": []
+  "entries": [],
+  "configured": false
 }

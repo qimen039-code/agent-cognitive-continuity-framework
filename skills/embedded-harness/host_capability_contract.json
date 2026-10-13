@@ -1,0 +1,248 @@
+{
+  "schema": "cbh.host_capability_contract.v1",
+  "updated_at": "2026-10-13",
+  "consumer": "harness_action_consumer",
+  "client_scope": "adopter_configured_host",
+  "operating_mode": "direct_advisory_plus_nonblocking_behavior_migration_hook",
+  "status_values": [
+    "verified_direct_call",
+    "advisory_only",
+    "reference_only",
+    "configured_pending_fresh_host_invocation",
+    "verified_fresh_host_invocation",
+    "host_pending",
+    "unsupported"
+  ],
+  "action_support": {
+    "await_scoped_user_confirmation": "agent_required",
+    "retrieve_matching_memory": "consumer_supported",
+    "prepare_task_local_prediction_review": "consumer_supported",
+    "prepare_task_local_correction_bundle": "consumer_supported",
+    "prepare_task_continuity_capsule": "consumer_supported",
+    "apply_engineering_execution_profile": "consumer_supported",
+    "verify_and_calibrate_feedback": "agent_required",
+    "perform_external_research_route": "agent_required",
+    "discover_preferred_tool_surface": "agent_required",
+    "activate_skill_frame": "agent_required",
+    "release_skill_frame": "agent_required",
+    "reactivate_skill_from_receipt": "agent_required",
+    "write_selected_memory_lane": "agent_required",
+    "resolve_conversation_link": "consumer_supported",
+    "bind_claim_evidence_boundary": "agent_required",
+    "bind_verified_facts": "consumer_supported",
+    "review_projectization_boundary": "agent_required",
+    "apply_edit_operation_profile": "agent_required",
+    "load_project_context": "agent_required",
+    "retrieve_static_knowledge_index": "agent_required",
+    "apply_read_depth_profile": "agent_required",
+    "apply_first_principles_profile": "context_binding_only",
+    "perform_skill_audit_profile": "context_binding_only",
+    "classify_debt_hygiene": "agent_required"
+  },
+  "capability_discovery": {
+    "schema": "cbh.capability_discovery_contract.v1",
+    "router_skill": "capability-router",
+    "meta_index_path": "<PRIVATE_CAPABILITY_INDEX>",
+    "registry_script": "../capability-router/scripts/capability_registry.py",
+    "refresh_policy": "24h_lazy_ttl_plus_source_fingerprint_plus_one_query_miss_refresh",
+    "status_axes": [
+      "registered_or_configured",
+      "current_exposed",
+      "authenticated",
+      "callable",
+      "action_covered"
+    ],
+    "runtime_status_values": [
+      "checked_available",
+      "checked_configured_not_exposed",
+      "checked_loaded_not_callable",
+      "checked_blocked",
+      "checked_missing",
+      "host_refresh_required"
+    ],
+    "refresh_boundary": "Use a host-provided skill/app/MCP refresh only for the selected surface and at most once for unchanged state. If the host does not expose the refresh API, return host_refresh_required; CBH cannot inject tools or create a callable handle.",
+    "context_boundary": "Only the router skill metadata and one capability-family summary are persistent context. Registry rows, SKILL.md bodies, and tool schemas are loaded on demand."
+  },
+  "direct_call_surfaces": {
+    "intake_router": {
+      "status": "reference_only",
+      "entrypoint": "harness_intake_router.ps1",
+      "command": "pwsh -NoProfile -File .\\harness_intake_router.ps1 -TaskText <TEXT> -Cwd <PATH>",
+      "boundary": "Advisory routing receipt only; it does not freeze a session or block a host tool call."
+    },
+    "action_consumer": {
+      "status": "reference_only",
+      "entrypoint": "harness_action_consumer.py",
+      "command": "python -B .\\harness_action_consumer.py --help",
+      "boundary": "Consumes a routing receipt, routes major incidents before broad search, and reads route-declared indexed project/conversation lanes with provenance and lifecycle preservation. For a uniquely resolved active conversation-registry match, it reads a bounded meta/state/link/ledger navigation bundle and follows at most one explicit continuation edge; stale ledgers remain read-only and raw payloads are not opened automatically. It can also bind one selected CE/IE/ERR/SOL/profile family to the actual unchanged candidate as a task-local correction bundle. Current exact matches remain selected; noncurrent records stay out of ordinary weak semantic-review context and are exposed only by exact record ID or explicit historical-review intent, always with current reuse disabled. For an external-research action it emits an anchor-preserving query/fallback receipt while leaving actual research deferred to the agent. In a later explicit bind_verified_facts phase it validates provenance/currentness metadata and atomically late-binds verified control facts into exact typed tool arguments or answer slots; model-context and audit-only facts remain separate. It validates the binding contract, not external truth. It is a direct-call consumer, not automatic host interception; task execution, profile promotion, and durable memory writes remain separately governed."
+    },
+    "behavior_correction_gate": {
+      "status": "reference_only",
+      "entrypoint": "behavior_correction_gate.py",
+      "command": "python -B .\\behavior_correction_gate.py --text <TEXT>",
+      "boundary": "Current-event advisory correction only. No host blocking, session freeze, policy mutation, or automatic long-term memory write."
+    },
+    "nested_tool_preflight": {
+      "status": "reference_only",
+      "entrypoint": "nested_tool_preflight.py",
+      "command": "typed JSON on stdin | python -B .\\nested_tool_preflight.py",
+      "boundary": "Direct-call preflight for an explicitly selected exec_command, legacy shell_command or web__run envelope. Native argument names roundtrip unchanged except an accepted parser-verified rewrite. A missing parser is unavailable; other shells never receive PowerShell rewrites. Public regression tests cover the direct helper. Automatic interception and actual dispatch require fresh evidence from the adopting host."
+    },
+    "task_continuity": {
+      "status": "reference_only",
+      "entrypoint": "task_continuity.py",
+      "command": "JSONL events | python -B .\\task_continuity.py --worker",
+      "boundary": "Dormant-by-default direct-call task continuity for tool, write, long-running, multi-stage, and resumed work. It tracks a stable goal, observable progress, plan steps separately from acceptance criteria, memory navigation state, next action, verifier state, reminders, and hash-bound transport pages. Calls remain process-local unless an explicit caller supplies a workfile. It stores no chain-of-thought and grants no authority. No active host adapter currently supplies automatic model visibility, so this surface must not be described as automatically injected."
+    },
+    "engineering_execution": {
+      "status": "reference_only",
+      "entrypoint": "engineering_execution.py",
+      "command": "python -B .\\engineering_execution.py --help",
+      "boundary": "Task-local advisory receipts for tracer-bullet delivery frontiers, reversible module-depth freeze or temporary-isolation probes, actual invocation topology, and two-adapter seam validation. The probe adapts the deletion thought experiment but performs no mutation; any external executor must restore state and provide an audit receipt. It does not delete modules, persist state, or grant authority."
+    },
+    "memory_runtime_bridge": {
+      "status": "reference_only",
+      "entrypoint": "memory_runtime_bridge.py",
+      "command": "python -B .\\memory_runtime_bridge.py --help",
+      "boundary": "Binds an existing memory-consumption receipt to one exact active .cumcwork task scope and records only verified evidence handles that were selected for that task. It preserves conversation and ledger navigation handles, does not open raw evidence automatically, does not write durable memory, and grants no authority."
+    },
+    "task_memory_checkpoint": {
+      "status": "reference_only",
+      "entrypoint": "task_memory_checkpoint.py",
+      "command": "python -B .\\task_memory_checkpoint.py --help",
+      "boundary": "Prepares a read-only, hash-bound candidate only from one fully verified retired .cumcwork task in an explicitly selected project or conversation lane. Promotion is a separate caller-owned memory-write action that synchronously appends the canonical v3 record, checks the store, and proves exact retrieval. It does not use a background queue, copy plans or raw tool output, open raw evidence, grant authority, or automatically promote every task."
+    },
+    "semantic_memory": {
+      "status": "reference_only",
+      "entrypoint": "semantic_memory.py",
+      "command": "python -B .\\semantic_memory.py --help",
+      "boundary": "Append-only cbh.semantic_memory_record.v3 writer and meta-first reader for future ERR, SOL, CE, IE, Anchor, Incident, project, conversation, typed event-cluster, decision, open-loop, reference, and governance records. Canonical records are the truth; compact meta is rebuildable navigation; legacy payloads remain hash-bound read-only links. Exact lane choice and durable-write authority remain agent-owned, raw evidence is never opened automatically, and this surface grants no execution authority."
+    },
+    "memory_benchmark": {
+      "status": "reference_only",
+      "entrypoint": "memory_benchmark.py",
+      "command": "python -B .\\memory_benchmark.py",
+      "boundary": "Runs bounded production regressions, deterministic old/new retrieval comparison, and temporary .cumcwork continuity replay. It does not migrate legacy payloads or claim tokenizer-token equivalence; timing claims are local warm-process observations."
+    },
+    "dangerous_delete_advisor": {
+      "status": "reference_only",
+      "entrypoint": "dangerous_delete_guard.py",
+      "command": "python -B .\\dangerous_delete_guard.py --command <COMMAND> --cwd <PATH>",
+      "boundary": "On-demand local risk classification only; execution authority remains with the governing agent instructions and native host policy."
+    },
+    "memory_isolation_gate": {
+      "status": "reference_only",
+      "entrypoint": "harness_memory_isolation_gate.ps1",
+      "command": "pwsh -NoProfile -File .\\harness_memory_isolation_gate.ps1 -ProjectLane <LANE> -RequestedPath <PATH>",
+      "boundary": "Validates a requested memory path/lane. It does not itself write memory."
+    },
+    "external_research_gate": {
+      "status": "reference_only",
+      "entrypoint": "harness_external_research_gate.ps1",
+      "command": "pwsh -NoProfile -File .\\harness_external_research_gate.ps1 -TaskText <TEXT>",
+      "boundary": "Detects whether current/external evidence is needed and emits an anchor-preserving original/exact/facet plan using typed objects and a data-driven source-capability registry. Multi-entity facets are linked to their local-clause anchor and ambiguous associations retain semantic review. Coverage and negative evidence require a planned query-to-target binding, a registered route allowed by that linked target, source role, canonical refs, conflict status, and target-specific authority confirmation when no canonical URL is mechanically known. Current claims additionally require a timezone-aware ISO observation inside a declared claim-specific freshness window. Fallback is tracked by query id, and unknown namespaces remain unresolved instead of being guessed as GitHub or another registry. It does not browse; the agent still performs, opens, verifies, and cites research."
+    },
+    "claim_schema_verifier": {
+      "status": "reference_only",
+      "entrypoint": "harness_claim_schema_verifier.ps1",
+      "command": "pwsh -NoProfile -File .\\harness_claim_schema_verifier.ps1 -ClaimJson <JSON> -FinalText <TEXT>",
+      "boundary": "Checks declared claim/evidence structure. It cannot make missing evidence true."
+    },
+    "policy_compiler": {
+      "status": "reference_only",
+      "entrypoint": "compile_policy_from_toml.py",
+      "command": "python -B .\\compile_policy_from_toml.py --check",
+      "boundary": "Offline maintenance compiler for tracked policy sections."
+    },
+    "policy_validator": {
+      "status": "reference_only",
+      "entrypoint": "validate_policy.ps1",
+      "command": "pwsh -NoProfile -File .\\validate_policy.ps1",
+      "boundary": "Validates active policy invariants and correction-profile integrity."
+    },
+    "client_update_check": {
+      "status": "reference_only",
+      "entrypoint": "codex_client_update_check.ps1",
+      "command": "pwsh -NoProfile -File .\\codex_client_update_check.ps1",
+      "boundary": "Run only after the user explicitly reports a Codex update. Read-only comparison of the current Appx/Browser-Chrome version marker and LocalAppData CLI/cua_node paths against config.toml; no repair or other CBH/client audit."
+    },
+    "safe_codex_cli": {
+      "status": "reference_only",
+      "entrypoint": "codex_cli_safe.ps1",
+      "command": "pwsh -NoProfile -File .\\codex_cli_safe.ps1 --version",
+      "boundary": "Selects a runnable LocalAppData Codex CLI; it does not change Codex configuration."
+    },
+    "session_ledger": {
+      "status": "reference_only",
+      "entrypoint": "codex_session_ledger.py",
+      "command": "python -B .\\codex_session_ledger.py --help",
+      "boundary": "Raw sessions are read-only and decoded as strict UTF-8. Initial builds publish an immutable generation through atomic CURRENT.json; later checkpoints verify the prior byte prefix, parse only complete tail lines, preserve prior evidence identities, pair outputs across checkpoint boundaries, doctor staging, and switch the pointer only after validation. Ledger output remains derived navigation rather than semantic memory."
+    },
+    "lifecycle_bridge": {
+      "status": "reference_only",
+      "entrypoint": "lifecycle_bridge.mjs",
+      "command": "node .\\lifecycle_bridge.mjs",
+      "boundary": "Dependency-free Node ESM reference adapter retained for direct tests and explicit maintenance. It is not registered as a Codex Hook and has no automatic model-context, checkpoint, permission, or semantic-memory authority."
+    }
+  },
+  "host_surfaces": {
+    "task_local_prediction_review": {
+      "status": "advisory_only",
+      "boundary": "Source-preserving candidate predictions are task-local and non-binding. Semantic applicability and calibration remain agent-owned; durable memory writes are not automatic."
+    },
+    "task_local_correction_bundle": {
+      "status": "advisory_only",
+      "boundary": "One unchanged candidate is linked to the relevant CE/IE/ERR/SOL/profile sources, exact action binding, verifier, and postcondition. Accepted deterministic profiles may be consumed by the separate nonblocking migration hook; all other decisions remain current-task validation or semantic review."
+    },
+    "canonical_fact_binding": {
+      "status": "reference_only",
+      "boundary": "Stateless atomic late binding inside harness_action_consumer. A control_fact changes output only when it is marked verified, has source and verification boundaries, has no unresolved conflict, is bound to a registered non-model producer receipt with a matching value hash, passes revision-sensitive freshness checks when applicable, names a registered consumer, and matches an exact typed placeholder or answer slot. Any binding error returns the original candidate unchanged. model_context is the only fact channel added to model context; audit_only exposes only receipt metadata and a value digest. This layer does not discover facts, certify external truth, grant authority, block the host, or persist state."
+    },
+    "task_continuity_capsule": {
+      "status": "advisory_only",
+      "boundary": "The task-continuity library and action-consumer path are directly callable. Automatic host delivery requires a configured and verified consumer in the adopting environment. A direct-call receipt is not automatic model visibility."
+    },
+    "codex_hooks": {
+      "status": "reference_only",
+      "boundary": "Configure compatible host callbacks in the adopting environment and retain fresh invocation evidence; this repository does not register hooks or publish host-local state."
+    },
+    "contextual_recall": {
+      "status": "reference_only",
+      "boundary": "context_recall.py uses an explicitly configured source collection to project bounded source-linked history. Public regression fixtures validate the direct helper; no host callback is installed by this package. Hooks make no model/network calls and do not write durable memory or grant authority. Host activation, general semantic-recall quality and quota savings require separate evidence."
+    },
+    "memory_lifecycle_bridge": {
+      "status": "reference_only",
+      "boundary": "The lifecycle bridge source and tests are retained, but the bridge is not registered as a Hook. Memory retrieval and ledger refresh require an explicit agent-owned direct call and separate write authority."
+    },
+    "behavior_correction_migration_hook": {
+      "status": "reference_only",
+      "boundary": "Stateless current-event rewrite for an accepted deterministic profile on a compatible host surface. Fresh host invocation and actual dispatch must verify the integration. Direct regression tests do not establish universal nested-tool coverage; uncovered candidates may use the separate direct preflight."
+    },
+    "dangerous_delete_advisor": {
+      "status": "advisory_only",
+      "boundary": "Compatibility-named direct classifier for optional local risk evidence; it is not a lifecycle callback or an authority source."
+    },
+    "codex_rules": {
+      "status": "advisory_only",
+      "boundary": "CBH can inventory native rules but does not silently change them."
+    },
+    "codex_browser_permissions": {
+      "status": "advisory_only",
+      "boundary": "CBH can audit browser settings but does not silently change them."
+    },
+    "codex_managed_requirements": {
+      "status": "host_pending",
+      "boundary": "System, MDM, cloud, or requirements.toml controls can outrank user configuration. CBH can detect visible markers, not override managed policy."
+    },
+    "codex_system_developer_layers": {
+      "status": "unsupported",
+      "boundary": "App/service-owned layers can be observed through available evidence but cannot be replaced by local CBH."
+    },
+    "native_memories": {
+      "status": "advisory_only",
+      "boundary": "Use host-owned native memory for inexpensive background recall where enabled, escalating to exact ACCF sources for ambiguity, conflict, currentness or material consequences. This package does not configure native memory, control its consolidation or guarantee removal of an older recalled summary."
+    }
+  },
+  "source_kind": "portable_reference_contract",
+  "host_activation_verified": false
+}

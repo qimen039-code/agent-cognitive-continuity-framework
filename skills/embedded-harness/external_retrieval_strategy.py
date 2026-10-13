@@ -1615,6 +1615,9 @@ def build_external_retrieval_receipt(
         anchor_status = "fail"
     receipt: dict[str, Any] = {
         "schema": "cbh.external_retrieval_receipt.v1",
+        "network_access_performed": False,
+        "durable_memory_write_performed": False,
+        "execution_owner": "host_model_agent",
         "retrieval_profile": profile,
         "recommended_modes": modes,
         "original_query": task_text,
@@ -1661,9 +1664,6 @@ def build_external_retrieval_receipt(
         "source_ledger_or_citations": [],
         "unresolved_facets": facets,
         "completion_rule": str(contract["coverage_rule"]),
-        "execution_owner": "host_model_agent",
-        "network_access_performed": False,
-        "durable_memory_write_performed": False,
         "execution_boundary": "agent_required_no_network_or_memory_write_performed",
     }
     _reduce_attempts(receipt, _attempt_list(attempts))

@@ -2,7 +2,7 @@
 
 # Agent Cognitive Continuity Framework
 
-[![Smoke checks](https://github.com/qimen039-code/claim-boundary-harness/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/qimen039-code/claim-boundary-harness/actions/workflows/smoke.yml)
+[![Smoke checks](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml)
 [![Zenodo concept DOI](./docs/assets/doi-badge.svg)](https://doi.org/10.5281/zenodo.21189879)
 
 ## In 30 Seconds
@@ -30,13 +30,25 @@ The existing repository URL, `cbh.*` schemas, and `harness_*` filenames remain
 stable compatibility identifiers during the rename. They are not the current
 project definition and do not establish runtime activation.
 
-For protected high-risk actions, ACCF's first enforcement surface is earlier
-than a tool hook: the model-facing control path must stop before forming or
-calling the action, report the exact target, scope, impact, and recovery
-boundary, and wait for exact human authorization. This is a mandatory
-pre-action decision gate. It is distinct from host-enforced tool interception,
-which exists only on execution paths that expose and honor a compatible hook,
-proxy, permission system, or sandbox.
+Authorization follows the user's agreed task scope and the host's real
+permission model. Routing, skills and phase boundaries do not consume an
+existing authorization or create an additional approval. Hooks and receipt
+fields cannot grant authority or substitute for host enforcement.
+
+### Current maintenance update
+
+The source reader supports scoped index/search/outline/read with original
+ranges, packed indexes and expandable context. The v3 memory reader separates
+metadata discovery from exact record materialization. Optional contextual
+recall reads native memory and retained public messages through bounded,
+source-linked access; it excludes opaque reasoning and keeps recognizable
+incident material diagnostic. See [context recall](docs/context-recall.md).
+
+Use [text-source-reader](skills/text-source-reader/SKILL.md) when repeated
+source lookup justifies indexing, and [capability-router](skills/capability-router/SKILL.md)
+when a concrete action lacks a current exposed tool. Known small files can be
+read directly. These interfaces do not prove general semantic completeness,
+automatic activation in a new host, or lower end-to-end model cost.
 
 ## Problems It Helps Solve
 
@@ -76,7 +88,7 @@ understand every ACCF contract before starting. Open a new Codex task with
 access to a local workspace and paste the following deployment request:
 
 ```text
-Deploy the latest main branch of Agent Cognitive Continuity Framework from https://github.com/qimen039-code/claim-boundary-harness into this Codex environment: read docs/agent-deployment-map.md first; inspect the installed instruction, skill, command, hook, model-loop, permission, and sandbox surfaces; show the exact write targets and back up existing configuration; select the declared deployment profile and stage its full resolved dependency closure; after any required approval, adapt the verified surfaces; initialize private local overlays from the public templates without publishing local paths or memory; run the compiler, validator, doctor, profile tests, and one fresh-task lifecycle smoke test; then return the deployment receipt with checked_available, checked_missing, and checked_blocked, and never claim that copied files alone are active.
+Deploy the latest main branch of Agent Cognitive Continuity Framework from https://github.com/qimen039-code/agent-cognitive-continuity-framework into this Codex environment: read docs/agent-deployment-map.md first; inspect the installed instruction, skill, command, hook, model-loop, permission, and sandbox surfaces; show the exact write targets and back up existing configuration; select the declared deployment profile and stage its full resolved dependency closure; after any required approval, adapt the verified surfaces; initialize private local overlays from the public templates without publishing local paths or memory; run the compiler, validator, doctor, profile tests, and one fresh-task lifecycle smoke test; then return the deployment receipt with checked_available, checked_missing, and checked_blocked, and never claim that copied files alone are active.
 ```
 
 The task inspects the installed instruction, skill, hook, permission, sandbox,
@@ -108,12 +120,12 @@ and tool surfaces before adapting paths. Start from the
 - Re-run the local compatibility checks after the host client, hook protocol, or
   relevant configuration changes.
 
-Current main-branch version: `v1.2.7`.
-Latest tagged GitHub release: [`v1.2.7`](https://github.com/qimen039-code/claim-boundary-harness/releases/tag/v1.2.7).
+Current main-branch version: `v1.2.8`.
+Latest tagged GitHub release: [`v1.2.8`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/tag/v1.2.8).
 For external current-version checks, use the default-branch `VERSION` together
-with GitHub [`releases/latest`](https://github.com/qimen039-code/claim-boundary-harness/releases/latest);
+with GitHub [`releases/latest`](https://github.com/qimen039-code/agent-cognitive-continuity-framework/releases/latest);
 both must identify the same release.
-The public repository retains only the latest release/tag. Commit history and
+Historical releases and tags remain unless their removal is explicitly authorized. Commit history and
 CHANGELOG preserve earlier versions; deleted historical tag URLs are not valid
 installation, capability, or compatibility guidance.
 
@@ -177,13 +189,9 @@ ACCF separates two meanings that were previously described too broadly as
   compliance. ACCF claims this only for paths that were actually wired and
   tested.
 
-Authorization is bound to one concrete event, one declared scope, and one use.
-It is consumed by that operation and does not authorize a later or materially
-different risky action. When the operator authorizes the exact action after
-receiving its disclosed risks, ACCF records that decision boundary but does not
-certify the action as safe or assume responsibility for consequences of that
-authorized operation. The agent must still stay inside the approved scope and
-report the observed result.
+Authorization follows the agreed task scope and remains valid while that scope
+and its effects remain unchanged. Routing and skill boundaries do not consume
+it. New external effects or irreversible operations require their own authorization.
 
 ## Technical Overview
 

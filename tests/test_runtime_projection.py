@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
 HARNESS = ROOT / "skills" / "embedded-harness"
 if str(HARNESS) not in sys.path:
     sys.path.insert(0, str(HARNESS))
@@ -114,6 +114,31 @@ def test_global_projection_separates_control_from_untrusted_task_content() -> No
     assert len(evidence["source_refs"]) == 4
 
 
+def test_unbound_action_projection_cannot_claim_task_progress() -> None:
+    current = capsule()
+    current["current_action"] = {
+        "text": "commandExecution",
+        "serves_output_ids": [],
+        "serves_criterion_ids": [],
+        "reason": "unbound_action",
+        "binding_source": "unbound",
+        "state_progress_allowed": False,
+    }
+
+    result = project_runtime("global_causal_task", capsule=current)
+    evidence = parse_entry(result["evidence_entry"])
+
+    assert evidence["payload"]["relation"] == {
+        "status": "unbound",
+        "specificity": "host_kind_only",
+        "serves_output_ids": [],
+        "serves_criterion_ids": [],
+        "reason": "unbound_action",
+        "binding_source": "unbound",
+        "state_progress_allowed": False,
+    }
+
+
 def test_dynamic_projection_is_reminder_only_and_claim_bound() -> None:
     result = project_runtime(
         "dynamic_reminder",
@@ -187,3 +212,103 @@ def test_projection_respects_tight_host_limits_without_losing_focus() -> None:
     assert len(dynamic_result["evidence_entry"]["value"]) <= 700
     assert dynamic_evidence["payload"]["trigger"] == "missing_postcondition"
     assert dynamic_evidence["payload"]["required_action"]
+
+
+def test_initial_write_intent_projects_attention_before_action_selection() -> None:
+    pending_write = capsule()
+    pending_write["activation_reasons"] = ["write_intent", "tool_required"]
+    pending_write["current_action"] = None
+    pending_write["progress_revision"] = 1
+
+    evidence = parse_entry(
+        project_runtime("global_causal_task", capsule=pending_write)["evidence_entry"]
+    )
+
+    assert evidence["payload"]["execution_attention"] == [
+        {
+            "trigger": "write_preflight_review_required",
+            "timing": "before_first_action",
+            "reason_codes": ["write_intent", "action_unbound"],
+            "required_checks": [
+                "exact_target_and_environment",
+                "write_method_format_and_encoding",
+                "minimal_change_boundary",
+                "post_write_verifier",
+            ],
+        }
+    ]
+
+
+def test_tool_only_projection_requests_action_alignment_before_first_tool() -> None:
+    tool_only = capsule()
+    tool_only["activation_reasons"] = ["tool_required"]
+    tool_only["current_action"] = None
+    tool_only["progress_revision"] = 1
+
+    evidence = parse_entry(
+        project_runtime("global_causal_task", capsule=tool_only)["evidence_entry"]
+    )
+
+    assert evidence["payload"]["execution_attention"] == [
+        {
+            "trigger": "action_alignment_review_required",
+            "timing": "before_first_action",
+            "reason_codes": ["tool_required", "action_unbound"],
+            "required_checks": [
+                "required_output_or_acceptance_binding",
+                "semantic_postcondition",
+            ],
+        }
+    ]
+
+
+def test_projection_without_execution_trigger_does_not_invent_attention() -> None:
+    inactive = capsule()
+    inactive["activation_reasons"] = []
+    inactive["current_action"] = None
+    inactive["progress_revision"] = 1
+
+    evidence = parse_entry(
+        project_runtime("global_causal_task", capsule=inactive)["evidence_entry"]
+    )
+
+    assert "execution_attention" not in evidence["payload"]
+
+
+def test_finalization_review_is_capability_neutral_for_corrected_reader_surface() -> None:
+    corrected = capsule()
+    corrected["global_goal_anchor"]["objective"] = (
+        "根据最终 diff 写 commit、release 说明和交付总结"
+    )
+    corrected["goal_deltas"] = [
+        {"kind": "correction", "text": "不要沿用被否的旧方案标题"},
+    ]
+    result = project_runtime("global_causal_task", capsule=corrected)
+    control = parse_entry(result["control_entry"])
+    evidence = parse_entry(result["evidence_entry"])
+    serialized = json.dumps(evidence, ensure_ascii=False)
+
+    assert evidence["payload"]["finalization_review"] == {
+        "status": "required",
+        "surface": "commit",
+        "capability_query": "review corrected reader-facing final surfaces",
+        "reason_codes": ["correction_present", "reader_facing_surface"],
+    }
+    assert control["control"]["capability_query"] == (
+        "review corrected reader-facing final surfaces"
+    )
+    assert "required_skill_id" not in control["control"]
+    assert "被否的旧方案标题" not in serialized
+
+
+def test_finalization_review_is_noop_for_ordinary_code_write() -> None:
+    corrected = capsule()
+    corrected["global_goal_anchor"]["objective"] = "修改 runtime_projection.py 并运行测试"
+    corrected["goal_deltas"] = [
+        {"kind": "correction", "text": "不要使用旧函数名"},
+    ]
+    evidence = parse_entry(
+        project_runtime("global_causal_task", capsule=corrected)["evidence_entry"]
+    )
+
+    assert "finalization_review" not in evidence["payload"]

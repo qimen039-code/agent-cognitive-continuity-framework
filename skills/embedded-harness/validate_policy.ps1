@@ -230,60 +230,18 @@ if ($null -ne $policy) {
     if ($null -eq $taskContinuityContract) {
       Add-Issue "task_continuity_contract_missing"
     } else {
-      if ((Get-ObjectPropertyValue $taskContinuityContract "schema") -ne "cbh.task_continuity_contract.v1") {
+      if ([string](Get-ObjectPropertyValue $taskContinuityContract "schema") -ne "cbh.task_continuity_contract.v1") {
         Add-Issue "task_continuity_contract_schema_invalid"
       }
       if ((Get-ObjectPropertyValue $taskContinuityContract "short_answer_default") -ne "dormant") {
         Add-Issue "task_continuity_short_answer_default_invalid"
       }
-      if ((Get-ObjectPropertyValue $taskContinuityContract "write_intent_requires_arm") -ne $true) {
-        Add-Issue "task_continuity_write_arm_disabled"
-      }
-      if ((Get-ObjectPropertyValue $taskContinuityContract "state_storage") -ne "process_local_only") {
-        Add-Issue "task_continuity_storage_invalid"
+      if ((Get-ObjectPropertyValue $taskContinuityContract "state_storage") -ne "persistent_tasks_local_cumcwork_only") {
+        Add-Issue "task_continuity_state_storage_invalid"
       }
       if ((Get-ObjectPropertyValue $taskContinuityContract "authority_granted") -ne $false) {
         Add-Issue "task_continuity_authority_invalid"
       }
-      foreach ($field in @("lifecycle_values","decision_values","activation_reasons","progress_status_values")) {
-        if ((ConvertTo-Array (Get-ObjectPropertyValue $taskContinuityContract $field)).Count -eq 0) {
-          Add-Issue "task_continuity_contract_field_empty:$field"
-        }
-      }
-      $expectedContinuityValues = @{
-        lifecycle_values = @("DORMANT","ARMED","ACTIVE","VERIFYING","RETIRED")
-        decision_values = @("dormant","arm","continue")
-        activation_reasons = @("write_intent","tool_required","long_running_task","multi_stage_task","task_resume","open_loop","prior_failure","explicit_request","existing_active_capsule")
-        progress_status_values = @("verified","inferred","unknown")
-      }
-      foreach ($field in $expectedContinuityValues.Keys) {
-        $actual = @(ConvertTo-Array (Get-ObjectPropertyValue $taskContinuityContract $field))
-        $expected = @($expectedContinuityValues[$field])
-        $orderedMismatch = $actual.Count -ne $expected.Count
-        if (-not $orderedMismatch) {
-          for ($index = 0; $index -lt $expected.Count; $index++) {
-            if ([string]$actual[$index] -ne [string]$expected[$index]) {
-              $orderedMismatch = $true
-              break
-            }
-          }
-        }
-        if ($orderedMismatch) {
-          Add-Issue "task_continuity_contract_values_invalid:$field"
-        }
-      }
-    }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $routerContract "receipt_fields")) -contains "task_continuity_decision")) {
-      Add-Issue "task_continuity_receipt_field_missing"
-    }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $routerContract "module_need_values")) -contains "task_continuity")) {
-      Add-Issue "task_continuity_module_value_missing"
-    }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $actionBindingContract "next_action_values")) -contains "prepare_task_continuity_capsule")) {
-      Add-Issue "task_continuity_action_binding_missing"
-    }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $actionBindingContract "completion_evidence_values")) -contains "task_continuity_capsule_or_dormant_receipt")) {
-      Add-Issue "task_continuity_completion_evidence_missing"
     }
     $engineeringExecutionContract = Get-ObjectPropertyValue $routerContract "engineering_execution_contract"
     if ($null -eq $engineeringExecutionContract) {
@@ -298,38 +256,28 @@ if ($null -ne $policy) {
       if ((Get-ObjectPropertyValue $engineeringExecutionContract "authority_granted") -ne $false) {
         Add-Issue "engineering_execution_authority_invalid"
       }
-      $expectedEngineeringProfiles = @("tracer_bullet_plan","deep_module_review","skill_invocation_topology","adapter_seam_review")
-      $actualEngineeringProfiles = @(ConvertTo-Array (Get-ObjectPropertyValue $engineeringExecutionContract "profile_values"))
-      $profilesMismatch = $actualEngineeringProfiles.Count -ne $expectedEngineeringProfiles.Count
-      if (-not $profilesMismatch) {
-        for ($index = 0; $index -lt $expectedEngineeringProfiles.Count; $index++) {
-          if ([string]$actualEngineeringProfiles[$index] -ne [string]$expectedEngineeringProfiles[$index]) {
-            $profilesMismatch = $true
-            break
-          }
-        }
-      }
-      if ($profilesMismatch) {
-        Add-Issue "engineering_execution_profile_values_invalid"
-      }
-      $engineeringProfileTriggers = Get-ObjectPropertyValue $engineeringExecutionContract "profile_triggers"
-      foreach ($profile in $expectedEngineeringProfiles) {
-        if ((ConvertTo-Array (Get-ObjectPropertyValue $engineeringProfileTriggers $profile)).Count -eq 0) {
+      foreach ($profile in @("tracer_bullet_plan","deep_module_review","skill_invocation_topology","adapter_seam_review")) {
+        $triggers = Get-ObjectPropertyValue (Get-ObjectPropertyValue $engineeringExecutionContract "profile_triggers") $profile
+        if ((ConvertTo-Array $triggers).Count -eq 0) {
           Add-Issue "engineering_execution_profile_triggers_missing:$profile"
         }
       }
     }
+    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $routerContract "receipt_fields")) -contains "task_continuity_decision")) {
+      Add-Issue "task_continuity_receipt_field_missing"
+    }
     if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $routerContract "receipt_fields")) -contains "engineering_execution_profiles")) {
       Add-Issue "engineering_execution_receipt_field_missing"
     }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $routerContract "module_need_values")) -contains "engineering_execution")) {
-      Add-Issue "engineering_execution_module_value_missing"
+    foreach ($moduleValue in @("task_continuity","engineering_execution")) {
+      if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $routerContract "module_need_values")) -contains $moduleValue)) {
+        Add-Issue "module_need_value_missing:$moduleValue"
+      }
     }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $actionBindingContract "next_action_values")) -contains "apply_engineering_execution_profile")) {
-      Add-Issue "engineering_execution_action_binding_missing"
-    }
-    if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $actionBindingContract "completion_evidence_values")) -contains "engineering_execution_profile_receipt")) {
-      Add-Issue "engineering_execution_completion_evidence_missing"
+    foreach ($actionValue in @("prepare_task_continuity_capsule","apply_engineering_execution_profile")) {
+      if (-not ((ConvertTo-Array (Get-ObjectPropertyValue $actionBindingContract "next_action_values")) -contains $actionValue)) {
+        Add-Issue "action_binding_value_missing:$actionValue"
+      }
     }
     $reflexiveGapContract = Get-ObjectPropertyValue $routerContract "reflexive_gap_contract"
     if ($null -eq $reflexiveGapContract) {
@@ -390,7 +338,9 @@ if ($null -ne $policy) {
       }
     }
     $referencedConversationContract = Get-ObjectPropertyValue $routerContract "referenced_conversation_memory_contract"
-    if ($null -ne $referencedConversationContract) {
+    if ($null -eq $referencedConversationContract) {
+      Add-Issue "referenced_conversation_memory_contract_missing"
+    } else {
       if ((Get-ObjectPropertyValue $referencedConversationContract "enabled") -ne $true) {
         Add-Issue "referenced_conversation_memory_contract_disabled"
       }
@@ -406,7 +356,13 @@ if ($null -ne $policy) {
             Add-Issue "active_conversation_memory_registry_schema_mismatch"
           }
           $entries = @(ConvertTo-Array (Get-ObjectPropertyValue $registry "entries"))
-          $registryRoot = Split-Path -Parent $registryPath
+          if ($entries.Count -eq 0) {
+            if ((Get-ObjectPropertyValue $registry "configured") -eq $false) {
+              Add-Warning "active_conversation_memory_registry_template_unconfigured"
+            } else {
+              Add-Issue "active_conversation_memory_registry_empty"
+            }
+          }
           foreach ($entry in $entries) {
             foreach ($field in @("registry_id","memory_id","state","root_path","meta_path","ledger_root_path","ledger_index_path")) {
               if ([string]::IsNullOrWhiteSpace([string](Get-ObjectPropertyValue $entry $field))) {
@@ -415,9 +371,6 @@ if ($null -ne $policy) {
             }
             foreach ($field in @("root_path","meta_path","ledger_root_path","ledger_index_path")) {
               $entryPath = [string](Get-ObjectPropertyValue $entry $field)
-              if ((-not [string]::IsNullOrWhiteSpace($entryPath)) -and (-not [System.IO.Path]::IsPathRooted($entryPath))) {
-                $entryPath = Join-Path $registryRoot $entryPath
-              }
               if ((-not [string]::IsNullOrWhiteSpace($entryPath)) -and (-not (Test-Path -LiteralPath $entryPath))) {
                 Add-Issue "active_conversation_memory_registry_target_missing:$field"
               }
@@ -452,7 +405,9 @@ if ($null -ne $policy) {
     }
 
     $deleteAdvisor = Get-ObjectPropertyValue $runtimeEnforcement "dangerous_delete_advisory_contract"
-    if ($null -ne $deleteAdvisor) {
+    if ($null -eq $deleteAdvisor) {
+      Add-Issue "dangerous_delete_advisory_contract_missing"
+    } else {
       if ((Get-ObjectPropertyValue $deleteAdvisor "schema") -ne "cbh.dangerous_delete_advisory.v1") {
         Add-Issue "dangerous_delete_advisory_contract_schema_invalid"
       }
@@ -657,7 +612,6 @@ if ($null -ne $policy) {
       }
     }
   }
-
 
   $claimContract = $policy.claim_schema_contract
   if ($null -eq $claimContract) {

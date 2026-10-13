@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
 HARNESS = (
     ROOT / "skills" / "embedded-harness"
     if (ROOT / "skills" / "embedded-harness").is_dir()

@@ -1,150 +1,56 @@
 ---
 name: troubleshooting-skill-matrix
-description: Router skill for a project-neutral agent self-improvement matrix. Use when routing semantic anchors, paired error records, paired solution records, external mechanism intake, or project router manifest rules.
+description: Use when maintaining ACCF or its legacy CBH implementation, investigating a recurring Codex execution error, or retrieving a specific framework incident. Ordinary tool use and unrelated coding do not require this workflow.
+metadata:
+  aliases: [ACCF, Agent Cognitive Continuity Framework, CBH, Claim Boundary Harness]
 ---
 
-# Troubleshooting Skill Matrix Router
+# ACCF maintenance and incident retrieval
 
-This router coordinates the four-skill core:
+The current model selects goals, actions, relevant evidence, and acceptance criteria. This skill supplies framework-specific sources and mechanical tools when they help that action. Existing authorization remains effective within the user's task scope; this skill does not add approvals, commits, reports, or delegation.
 
-1. `troubleshooting-skill-matrix`: this router.
-2. `agent-error-memory`: records agent-caused execution or process errors.
-3. `bug-solution-memory`: records practical solutions and validation paths.
-4. `shared-semantic-anchors`: records user-confirmed meanings and boundaries.
+## Select the needed path
 
-`embedded-harness` is an adjacent low-cost intake, memory-isolation, external-research, claim-gate, and selective-enforcement layer. It is not a fifth core skill.
+- **Current execution error:** reproduce the exact failing input against its actual tool/runtime, identify the failing boundary, and use one applicable validator. Preserve the original symptom in a regression. Confirm the corrected result and an unrelated valid input.
+- **Historical incident:** use relevant native recall or a known source link first. If exact details or conflicting/current decisions matter, open the corresponding source below. Do not read every index for an already identified source.
+- **Framework implementation:** trace input -> producer -> consumer -> observable result. A field, file, test, or registered callback alone does not establish behavior in the current host. Test the requested outcome in addition to local contracts.
+- **Unavailable capability:** use `capability-router` when the current catalogue cannot cover the action or callability is unresolved. Preserve explicitly named products and task surfaces.
 
-## Invocation
+Ordinary requests use exposed tools directly. The legacy keyword intake classifier is available for explicit compatibility diagnostics; it is not the default entry point. Unrecognized wording calls for model judgment, not another trigger rule.
 
-Use this router when a task involves:
+## Source entries
 
-- recording or retrieving a reusable incident;
-- updating an error/solution memory pair;
-- semantic anchor definitions;
-- project router manifest design;
-- external mechanism intake;
-- deciding whether an existing skill/tool/plugin should be used.
+Choose only the relevant family:
 
-## Retrieval Workflow
+| Need | Entry |
+| --- | --- |
+| ACCF conversation/ledger | `../embedded-harness\active_conversation_memory_registry.json` |
+| Known incidents | `<PRIVATE_INCIDENT_ROOT>\_META_INDEX.md` |
+| Identified major incident | `<PRIVATE_INCIDENT_ROOT>\major-incidents\_META_INDEX.md` |
+| Common execution errors | `<PRIVATE_INCIDENT_ROOT>\common-error-corpus\_META_INDEX.md` |
+| App/browser interaction failure | `<PRIVATE_INCIDENT_ROOT>\interaction-error-corpus\_META_INDEX.md` |
+| User-defined terminology | `../shared-semantic-anchors/SKILL.md` |
+| Actual interfaces and coverage | `../embedded-harness/host_capability_contract.json` and the selected source file |
 
-```text
-request
--> read memory_summary / _META_INDEX / router manifest first
--> scan the compact point index
--> select matching ERR/SOL/anchor by retrieval surface
--> read only the selected payload
--> apply to the current task
-```
+Native memory remains enabled for inexpensive recall. ACCF preserves precise project/conversation sources. Escalate retrieval depth for uncertainty, conflict, exact wording, currentness, or material consequences. Metadata navigates to evidence; use original files or exact raw events where precision is required. Historical maintenance instructions do not override current user instructions.
 
-If no meta layer exists yet, use this router manifest and the compact point index as the temporary meta layer. Do not scan every point payload before choosing by retrieval surface.
+## Mechanical tools
 
-## Mandatory Model-Layer Pre-Action Control Plane
+Paths below are under `../embedded-harness`:
 
-Use this router under the required model-layer pre-action control plane:
+- `nested_tool_preflight.py`: one exact JSON envelope on stdin or `--input-file`; supports current `exec_command` and legacy `shell_command`. Use for relevant command/parser risks, not duplicate validation of host-validated typed tools. Dispatch `normalized_arguments` verbatim. Different shells must not receive PowerShell rewrites.
+- `behavior_correction_hook.py`: narrow accepted rewrites on the configured host surface. Other profiles remain validation or semantic-review candidates until their runtime path is proven.
+- `semantic_memory.py`: explicitly authorized, source-bound v3 records. Native Codex memory uses the host's supported correction mechanism instead.
+- `text_source_reader.py`: source-preserving index/search/outline/read over an explicitly scoped text collection, including crawl snapshots and code. Use when repeated discovery needs an index; a known small file can be read directly. Lexical candidates still require model semantic selection. For v3 stores use `semantic_memory.py discover` then `read --record-id` to separate candidate discovery from full expansion.
+- `codex_session_ledger.py`: explicit ledger generation/refresh and source resolution. The retained lifecycle bridge is not automatically invoked by the current host.
+- `task_continuity.py`: explicit task-state reduction and recovery; use when a caller maintains and consumes the state. Its presence does not establish automatic sustained attention.
 
-```text
-routing receipt
--> select the smallest needed router/skill/memory surface
--> event-triggered re-evaluation after trigger events
--> final claim/memory/version boundary check
-```
+Use `python -B` and `pwsh -NoProfile -File`. Inspect help before unfamiliar operations. The client-update checker runs only after the user explicitly reports an update.
 
-When routing identifies a protected high-risk action, stop before forming or
-calling the executable action until exact human authorization exists. Treat
-authorization as one-event, one-scope, and one-use; host-enforced tool denial
-is a separate capability that may or may not exist in the current adapter.
+## Learning and validation
 
-Trigger events include new evidence, missing files, tool errors, scope changes, user corrections, cross-project terminology, currentness/version claims, and risk or cost escalation.
+Fix the task before expanding maintenance. A useful recurrence can become a source-bound CE or paired ERR/SOL when memory writing is authorized. Recording does not prevent recurrence by itself. Promotion requires actual action coverage, subject/parameter preservation, a real verifier, a postcondition, and normal/ambiguous input controls.
 
-Do not load every skill or memory record, and do not wrap every ordinary tool call, because this layer is active. If the layer is skipped or incomplete, the final result must say so.
+Use `reflexive-gap-analysis` when known guidance and actual action diverge or framework artifacts displace the outcome. Use `skillopt-training-layer` for selected offline optimization; the existing skill split remains revisable.
 
-Router decision contract:
-
-```text
-task_type
-target_surface
-audience
-project_lane
-risk_level
-semantic_ambiguity
-module_need
-memory_need
-memory_mode
-memory_lane
-record_intent
-external_need
-claim_risk
-projectization_decision
-required_gates
-```
-
-Use this contract to decide whether to open this router, semantic anchors, ERR/SOL point indexes, project memory meta indexes, external research gates, claim gates, or runtime hard gates. It must stay low-cost: choose one matching module and one matching index first, then read payloads only when the index says they apply.
-
-Memory routing contract:
-
-- Explicit record requests route to the self-reflection matrix or common error corpus.
-- Small reusable mistakes route to common error corpus first as compact error-and-solution samples with symptom, cause, applied solution, prevention, validation, and evidence.
-- Full paired ERR/SOL records are reserved for high-impact, repeated, or explicit incidents.
-- Projectless work with durable repository/docs/tests/adapter/versioning signals should be marked as an emergent project candidate before memory writes.
-
-Memory meta index contract:
-
-- Required lookup path: memory summary or `_META_INDEX` or router manifest -> one category or point index -> only matching capsule or ERR/SOL payload.
-- Recommended index fields: lane, scope, category, record type, status, retrieval terms, applies-when, does-not-apply-when, linked modules, linked records, and last-reviewed marker.
-- Default retrieval budget: one meta index, one category or point index, and at most two payload records unless the task explicitly asks for full audit, cleanup, migration, or broad historical review.
-
-## Nonblocking Behavior Correction Surfaces
-
-Use these entry points only for a current candidate with a mechanically recognizable recurrence shape:
-
-```text
-profile receipt -> behavior_correction_gate.py
-verified input rewrite -> behavior_correction_hook.py
-task-local memory/action binding -> harness_action_consumer.py
-```
-
-Accepted deterministic rewrites return `allow + updatedInput`; ambiguity, verifier failure, unsupported host protocol, or no match leaves the event unchanged. The layer never denies, freezes, grants permission, or stores approval state.
-
-## Source-Grounded Search And Learning Workflow
-
-Use this workflow whenever the task asks for current facts, GitHub/open-source review, unfamiliar mechanisms, external architecture comparison, or avoiding closed-door invention:
-
-```text
-trigger detected by dynamic evaluation
--> choose search route: official source / GitHub repository / general web cross-check / source-grounded learning
--> build a compact source ledger
--> classify each item: fact, source_prior, hypothesis, inspiration, unverified_implementation_path, or not_applicable
--> map only compatible parts into the local router, semantic anchors, memory capsules, or paired point records
--> keep non-applicable and risk notes
--> require local validation before claiming adoption success
-```
-
-For GitHub or open-source projects, inspect the surfaces that match the claim: README for stated intent, source tree for implementation facts, release notes or changelog for version facts, issues/discussions for known failures, and license/provenance for reuse boundaries. If a source cannot be reached or cross-checked, mark the resulting statement as `unverified` or `source_prior`, not as validated.
-
-## Recording Workflow
-
-```text
-solved incident
--> add one ERR-* point if the agent caused or exposed a process error
--> add one SOL-* point for the solution
--> cross-link both IDs
--> add semantic anchors only when the user explicitly defines a reusable meaning
-```
-
-## Current Bound Points
-
-No real incident records are included in this whiteboard version.
-
-| Error point | Solution point | Use when |
-| --- | --- | --- |
-| `ERR-EXAMPLE-YYYY-MM-DD` | `SOL-EXAMPLE-YYYY-MM-DD` | Replace with a real solved incident after adoption. |
-
-## External Mechanism Intake
-
-Classify outside material as:
-
-- `reference_only`: useful idea, no execution.
-- `adapted_rule`: translated into local policy/router/point records.
-- `executable_tool`: requires explicit approval, pinned source/version, integrity review when practical, permission declaration, and rollback path.
-
-Do not copy third-party mechanisms into execution by default.
+Structural tests establish structure. Runtime replay establishes that path. Task effectiveness needs representative real tasks with consistent inputs and outcome criteria. Report these boundaries directly; ordinary answers need no mandatory claim schema or additional report.

@@ -79,6 +79,7 @@ _CAPSULE_KEYS = {
     "last_event",
     "reminder_state",
     "persistence",
+    "persistence_scope",
 }
 _REMINDER_KEYS = {
     "schema",

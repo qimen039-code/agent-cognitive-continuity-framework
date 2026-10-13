@@ -1,6 +1,6 @@
 ---
 name: agent-error-memory
-description: Empty template for paired agent error memory. Use to record agent-caused execution, diagnosis, safety, routing, or process failures after they are solved and ready for reuse.
+description: "Use for an explicitly selected historical agent-error record or authorized durable recording of a material incident. Ordinary execution mistakes are fixed in the current task; they do not automatically invoke the incident-memory workflow."
 ---
 
 # Agent Error Memory

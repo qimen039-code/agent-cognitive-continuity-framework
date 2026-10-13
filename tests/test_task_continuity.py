@@ -10,7 +10,7 @@ import pytest
 import tomllib
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
 PUBLIC_HARNESS = ROOT / "skills" / "embedded-harness"
 HARNESS = PUBLIC_HARNESS if PUBLIC_HARNESS.is_dir() else ROOT
 if str(HARNESS) not in sys.path:
@@ -68,7 +68,7 @@ def test_short_answer_only_question_stays_dormant() -> None:
     }
 
 
-def test_initial_write_intent_arms_even_when_turn_relation_is_ambiguous() -> None:
+def test_initial_write_intent_is_turn_local_even_when_turn_relation_is_ambiguous() -> None:
     decision = decide_task_continuity(
         {
             "edit_operation_profile": "none",
@@ -86,23 +86,285 @@ def test_initial_write_intent_arms_even_when_turn_relation_is_ambiguous() -> Non
         ),
     )
 
-    assert decision["decision"] == "arm"
+    assert decision["decision"] == "observe_once"
     assert decision["reasons"] == ["write_intent", "tool_required"]
     assert decision["host_delivery"] == "ready"
 
 
-def test_existing_active_capsule_uses_contract_continue_decision() -> None:
+def test_empty_objective_stage_exit_cannot_create_a_capsule() -> None:
+    route = {
+        "edit_operation_profile": "none",
+        "memory_mode": "none",
+        "tool_surface_need": "host_lifecycle_event",
+        "action_bindings": [],
+    }
+    observed = event(
+        "empty:stage-exit",
+        "stage_exit",
+        task_key="thread-empty",
+        objective="",
+        retire_if_complete=True,
+    )
+
+    assert decide_task_continuity(route, observed)["decision"] == "dormant"
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": route,
+            "task_event": observed,
+            "capsule": None,
+        }
+    )
+    assert response["capsule"] is None
+    assert response["additional_context_entry"] is None
+    assert response["persistence"] == "none"
+
+
+def test_short_then_phrase_does_not_promote_cross_turn_continuity() -> None:
+    decision = decide_task_continuity(
+        {
+            "edit_operation_profile": "read_only",
+            "memory_mode": "none",
+            "tool_surface_need": "none",
+            "action_bindings": [],
+        },
+        event(
+            "short-then:1",
+            "task_observed",
+            objective="先检查一个文件，然后告诉我结果",
+        ),
+    )
+    assert decision["decision"] == "observe_once"
+    assert "multi_stage_task" not in decision["reasons"]
+
+
+def test_explicit_plan_to_completion_promotes_cross_turn_continuity() -> None:
+    decision = decide_task_continuity(
+        {
+            "edit_operation_profile": "none",
+            "memory_mode": "none",
+            "tool_surface_need": "none",
+            "action_bindings": [],
+        },
+        event(
+            "long-plan:1",
+            "task_observed",
+            objective="先制定 15 步计划，然后按计划执行到全部完成为止",
+            multi_stage=True,
+        ),
+    )
+    assert decision["decision"] == "arm"
+    assert "multi_stage_task" in decision["reasons"]
+
+
+def test_existing_active_capsule_does_not_authorize_current_user_input() -> None:
     route = write_route()
     capsule = new_task_capsule(
         route,
         event("start:1", "task_observed", objective="修复文件"),
     )
+    source_text = "继续修复"
     decision = decide_task_continuity(
         route,
-        event("observe:2", "task_observed", objective="继续修复"),
+        event(
+            "observe:2",
+            "task_observed",
+            objective=source_text,
+            event_origin="current_user_input",
+            source_units=[
+                {
+                    "id": "observe:2:user-request",
+                    "source_role": "current_user_request",
+                    "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                }
+            ],
+        ),
         capsule,
     )
-    assert decision["decision"] == "continue"
+    assert decision["decision"] == "safe_readonly"
+    assert decision["reasons"] == ["turn_relation_receipt_required"]
+
+
+def test_discussing_persistence_and_resume_words_does_not_arm_continuity() -> None:
+    decision = decide_task_continuity(
+        {
+            "edit_operation_profile": "read_only",
+            "memory_mode": "none",
+            "tool_surface_need": "none",
+            "action_bindings": [],
+        },
+        event(
+            "discussion:continuity",
+            "task_observed",
+            objective=(
+                "检查连续记忆胶囊持续残留是否影响新目标，并解释恢复全局目标"
+                "为何会误绑定；只汇报结果"
+            ),
+        ),
+    )
+
+    assert decision["decision"] == "observe_once"
+    assert "multi_stage_task" not in decision["reasons"]
+    assert "task_resume" not in decision["reasons"]
+
+
+def test_unbound_user_turn_keeps_active_capsule_byte_equivalent() -> None:
+    route = write_route()
+    active = new_task_capsule(
+        route,
+        event(
+            "safe-readonly:start",
+            "task_observed",
+            task_key="thread-safe-readonly",
+            objective="完成原任务",
+            acceptance_criteria=[{"id": "verified", "text": "原任务已验证"}],
+        ),
+    )
+    before = json.loads(json.dumps(active, ensure_ascii=False))
+    source_text = "把两个新问题交给另一个模型研究"
+
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": route,
+            "task_event": event(
+                "safe-readonly:new-turn",
+                "task_observed",
+                task_key="thread-safe-readonly",
+                objective=source_text,
+                intent_kind="refine",
+                intent_confidence="high",
+                intent_source="explicit_marker",
+                binding_required=False,
+                event_origin="current_user_input",
+                relation_nonce="nonce-safe-readonly",
+                source_units=[
+                    {
+                        "id": "safe-readonly:new-turn:user-request",
+                        "source_role": "current_user_request",
+                        "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                    }
+                ],
+            ),
+            "capsule": active,
+        }
+    )
+
+    assert response["decision"]["decision"] == "safe_readonly"
+    assert response["capsule"] == before
+    assert response["transition"]["changed"] is False
+    assert response["persistence"] == "none"
+    assert response["additional_context_entries"]["control"]["kind"] == "application"
+    assert response["transport_receipt"]["total_estimated_tokens"] <= 300
+    assert response["relation_binding"]["required"] is True
+    assert "workfile_handle" not in response
+
+
+def test_validated_typed_relation_receipt_allows_bound_refinement() -> None:
+    route = write_route()
+    active = new_task_capsule(
+        route,
+        event(
+            "typed-relation:start",
+            "task_observed",
+            task_key="thread-typed-relation",
+            objective="完成原任务",
+            acceptance_criteria=[{"id": "verified", "text": "原任务已验证"}],
+        ),
+    )
+    source_text = "补充原任务的验收说明"
+    source_id = "typed-relation:turn:user-request"
+    nonce = "typed-relation-nonce"
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": route,
+            "task_event": event(
+                "typed-relation:turn",
+                "task_observed",
+                task_key="thread-typed-relation",
+                objective=source_text,
+                binding_required=True,
+                relation_nonce=nonce,
+                source_units=[
+                    {
+                        "id": source_id,
+                        "source_role": "current_user_request",
+                        "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                    }
+                ],
+                turn_relation_receipt={
+                    "schema": "cbh.turn_relation_receipt.v1",
+                    "relation_nonce": nonce,
+                    "candidate_task_id": active["capsule_id"],
+                    "expected_goal_revision": active["goal_revision"],
+                    "relation_kind": "refine",
+                    "target_task_id": active["capsule_id"],
+                    "source_unit_ids": [source_id],
+                    "ambiguity_codes": [],
+                },
+            ),
+            "capsule": active,
+        }
+    )
+
+    assert response["decision"]["decision"] == "continue"
+    assert response["capsule"]["goal_revision"] == active["goal_revision"] + 1
+    assert response["capsule"]["goal_deltas"][-1]["text"] == source_text
+    assert response["capsule"]["turn_relation"]["source"] == "typed_receipt"
+
+
+def test_ambiguous_refinement_receipt_cannot_mutate_the_active_goal() -> None:
+    route = write_route()
+    active = new_task_capsule(
+        route,
+        event(
+            "ambiguous-relation:start",
+            "task_observed",
+            task_key="thread-ambiguous-relation",
+            objective="完成原任务",
+            acceptance_criteria=[{"id": "verified", "text": "原任务已验证"}],
+        ),
+    )
+    source_text = "补充验收，也可能是新任务"
+    source_id = "ambiguous-relation:turn:user-request"
+    nonce = "ambiguous-relation-nonce"
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": route,
+            "task_event": event(
+                "ambiguous-relation:turn",
+                "task_observed",
+                task_key="thread-ambiguous-relation",
+                objective=source_text,
+                event_origin="current_user_input",
+                relation_nonce=nonce,
+                source_units=[
+                    {
+                        "id": source_id,
+                        "source_role": "current_user_request",
+                        "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                    }
+                ],
+                turn_relation_receipt={
+                    "schema": "cbh.turn_relation_receipt.v1",
+                    "relation_nonce": nonce,
+                    "candidate_task_id": active["capsule_id"],
+                    "expected_goal_revision": active["goal_revision"],
+                    "relation_kind": "refine",
+                    "target_task_id": active["capsule_id"],
+                    "source_unit_ids": [source_id],
+                    "ambiguity_codes": ["possible_new_task"],
+                },
+            ),
+            "capsule": active,
+        }
+    )
+
+    assert response["decision"]["decision"] == "safe_readonly"
+    assert response["capsule"] == active
+    assert response["transition"]["changed"] is False
 
 
 def test_first_substantive_event_is_applied_when_capsule_is_created() -> None:
@@ -112,6 +374,9 @@ def test_first_substantive_event_is_applied_when_capsule_is_created() -> None:
             "write:first",
             "write_result_received",
             objective="写入并验证文件",
+            acceptance_criteria=[
+                {"id": "write_applied", "text": "请求的写入结果已核对"},
+            ],
             acceptance_id="write_applied",
             postcondition_satisfied=False,
         ),
@@ -164,304 +429,83 @@ def test_plan_progress_is_separate_from_the_acceptance_contract() -> None:
     ]
 
 
-def test_unmatched_active_turn_preserves_the_global_goal_as_a_local_delta() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event(
-            "global:start",
-            "task_observed",
-            objective="修复连续工作记忆并完成统一验证",
-            purpose="长对话中始终围绕整体目标执行",
-            acceptance_criteria=[{"id": "verified", "text": "整体修复经过验证"}],
-        ),
-    )
-
+def test_fifteen_step_packing_plan_arms_persistent_continuity_and_keeps_order() -> None:
+    plan_steps = [
+        {
+            "id": f"task-{index}",
+            "text": f"Task {index}: 装柜算法改进步骤",
+            "status": "completed" if index == 1 else "in_progress" if index == 2 else "pending",
+        }
+        for index in range(1, 16)
+    ]
+    route = {
+        "edit_operation_profile": "none",
+        "memory_mode": "none",
+        "tool_surface_need": "host_plan_event",
+        "action_bindings": [],
+    }
     response = process_worker_request(
         {
             "op": "observe",
-            "route_receipt": write_route(),
+            "route_receipt": route,
             "task_event": event(
-                "global:delta",
-                "task_observed",
-                objective="其他的呢，为什么刚才的上下文不见了",
-                intent_kind="ambiguous",
-                intent_confidence="low",
-                intent_source="fallback",
-                intent_reason_codes=["active_turn_relation_unresolved"],
+                "packing-plan:updated",
+                "progress_snapshot",
+                task_key="thread-packing",
+                objective="装柜算法优化方案",
+                plan_steps=plan_steps,
             ),
-            "capsule": capsule,
+            "capsule": None,
         }
     )
 
-    updated = response["capsule"]
-    assert updated["capsule_id"] == capsule["capsule_id"]
-    assert updated["objective"] == "修复连续工作记忆并完成统一验证"
-    assert updated["global_goal_anchor"]["objective"] == updated["objective"]
-    assert updated["active_local_delta"]["turn_ref"] == "global:delta"
-    assert updated["turn_relation"] == {
-        "kind": "ambiguous",
-        "confidence": "low",
-        "source": "fallback",
-        "reason_codes": ["active_turn_relation_unresolved"],
-        "reviewed_against": {
-            "capsule_id": capsule["capsule_id"],
-            "goal_revision": 1,
-        },
-    }
-    assert updated["semantic_review_required"] is True
+    assert response["decision"]["decision"] == "arm"
+    assert "plan_observed" in response["decision"]["reasons"]
+    assert response["capsule"]["persistence_scope"] == "cross_turn"
+    assert response["capsule"]["plan_steps"] == plan_steps
+    assert response["capsule"]["next_action"] == "Task 2: 装柜算法改进步骤"
+    assert response["capsule"]["next_action_reason"] == "earliest_incomplete_plan_step"
+    assert response["capsule"]["acceptance_criteria"] == []
+    assert response["persistence"] == "none"
+    assert response["dynamic_reminders"][0]["trigger"] == "plan_alignment_review_required"
+    control = json.loads(
+        response["additional_context_entries"]["control"]["value"].split("\n", 1)[1]
+    )
+    assert control["required_action_code"] == "continue_pending_plan_before_completion"
 
 
-def test_repeated_bounded_side_questions_preserve_one_global_frame_and_request_turn_adjudication() -> None:
-    capsule = new_task_capsule(
-        write_route(),
+def test_tool_result_with_pending_plan_projects_verification_and_next_step() -> None:
+    current = new_task_capsule(
+        {"tool_surface_need": "host_plan_event"},
         event(
-            "side-chat:start",
-            "task_observed",
-            objective="完成连续记忆修复、验证并发布小版本",
-            next_action="运行最终验证",
-        ),
-    )
-    original_id = capsule["capsule_id"]
-    original_anchor = capsule["global_goal_anchor"]
-
-    for index, question in enumerate(("顺便问一下今天星期几？", "那明天呢？"), start=1):
-        response = process_worker_request(
-            {
-                "op": "observe",
-                "route_receipt": write_route(),
-                "task_event": event(
-                    f"side-chat:{index}",
-                    "task_observed",
-                    objective=question,
-                    intent_kind="ambiguous",
-                    intent_confidence="low",
-                    intent_source="fallback",
-                    intent_reason_codes=["active_turn_relation_unresolved"],
-                ),
-                "capsule": capsule,
-                "host_limits": {"max_chars": 3000, "max_tokens": 850},
-            }
-        )
-        capsule = response["capsule"]
-
-    control = json.loads(response["additional_context_entries"]["control"]["value"].split("\n", 1)[1])
-    assert capsule["capsule_id"] == original_id
-    assert capsule["global_goal_anchor"] == original_anchor
-    assert capsule["suspended_task_stack"] == []
-    assert capsule["semantic_review_required"] is True
-    assert control["required_action_code"] == "adjudicate_current_turn_without_replacing_global_goal"
-    assert control["turn_relation_options"] == [
-        "global_goal_delta",
-        "bounded_side_conversation",
-        "explicit_global_replacement",
-    ]
-    assert control["bounded_side_conversation_policy"] == "answer_current_turn_then_keep_global_goal_resumable"
-
-
-def test_explicit_return_to_global_task_clears_transient_semantic_review() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event("return:start", "task_observed", objective="完成原有长期任务"),
-    )
-    ambiguous = apply_task_event(
-        capsule,
-        event(
-            "return:side",
-            "task_observed",
-            objective="临时问一个无关问题",
-            intent_kind="ambiguous",
-            intent_confidence="low",
-            intent_source="fallback",
-        ),
-    )["capsule"]
-    resumed = apply_task_event(
-        ambiguous,
-        event(
-            "return:resume",
-            "task_observed",
-            objective="回到刚才的主任务，继续",
-            intent_kind="continue_ack",
-            intent_confidence="high",
-            intent_source="explicit_marker",
-            reviewed_against={
-                "capsule_id": ambiguous["capsule_id"],
-                "goal_revision": ambiguous["goal_revision"],
-            },
-        ),
-    )["capsule"]
-
-    assert resumed["capsule_id"] == capsule["capsule_id"]
-    assert resumed["objective"] == "完成原有长期任务"
-    assert resumed["semantic_review_required"] is False
-    assert resumed["turn_relation"]["kind"] == "continue_ack"
-
-
-def test_unbound_fallback_new_task_cannot_supersede_an_active_global_goal() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event("guard:start", "task_observed", objective="完成原有整体任务"),
-    )
-
-    response = process_worker_request(
-        {
-            "op": "observe",
-            "route_receipt": write_route(),
-            "task_event": event(
-                "guard:unbound",
-                "task_observed",
-                objective="一句措辞不同的局部问题",
-                intent_kind="new_task",
-                intent_confidence="medium",
-                intent_source="fallback",
-                intent_reason_codes=["independent_substantive_turn"],
-            ),
-            "capsule": capsule,
-        }
-    )
-
-    assert response["capsule"]["capsule_id"] == capsule["capsule_id"]
-    assert response["capsule"]["objective"] == "完成原有整体任务"
-    assert response["capsule"]["semantic_review_required"] is True
-    assert response["transition"]["transition_reasons"] == [
-        "global_goal_preserved_pending_semantic_review"
-    ]
-
-
-def test_only_current_revision_bound_explicit_replacement_supersedes() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event("replace:start", "task_observed", objective="完成旧整体任务"),
-    )
-    request = {
-        "op": "observe",
-        "route_receipt": write_route(),
-        "task_event": event(
-            "replace:explicit",
-            "task_observed",
-            objective="放弃旧目标，改为完成新的整体任务",
-            intent_kind="new_task",
-            intent_confidence="high",
-            intent_source="explicit_marker",
-            intent_reason_codes=["explicit_global_replacement"],
-            reviewed_against={
-                "capsule_id": capsule["capsule_id"],
-                "goal_revision": capsule["goal_revision"],
-            },
-        ),
-        "capsule": capsule,
-    }
-
-    replaced = process_worker_request(request)["capsule"]
-    assert replaced["capsule_id"] != capsule["capsule_id"]
-    assert replaced["objective"] == "放弃旧目标，改为完成新的整体任务"
-    assert replaced["supersedes_capsule_id"] == capsule["capsule_id"]
-    assert replaced["state_version"] == 3
-
-    stale_request = json.loads(json.dumps(request, ensure_ascii=False))
-    stale_request["task_event"]["event_id"] = "replace:stale"
-    stale_request["task_event"]["reviewed_against"]["goal_revision"] = 0
-    preserved = process_worker_request(stale_request)["capsule"]
-    assert preserved["capsule_id"] == capsule["capsule_id"]
-    assert preserved["semantic_review_required"] is True
-
-
-def test_side_task_pushes_and_pops_without_replacing_the_global_goal() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event("side:start", "task_observed", objective="完成连续记忆修复"),
-    )
-    side = process_worker_request(
-        {
-            "op": "observe",
-            "route_receipt": write_route(),
-            "task_event": event(
-                "side:push",
-                "task_observed",
-                objective="先确认一个独立的小问题，之后继续原任务",
-                intent_kind="side_task",
-                intent_confidence="high",
-                intent_source="explicit_marker",
-                intent_reason_codes=["explicit_temporary_side_task"],
-                reviewed_against={
-                    "capsule_id": capsule["capsule_id"],
-                    "goal_revision": capsule["goal_revision"],
-                },
-            ),
-            "capsule": capsule,
-        }
-    )["capsule"]
-
-    assert side["objective"] == "完成连续记忆修复"
-    assert side["active_local_delta"]["kind"] == "side_task"
-    assert side["suspended_task_stack"][-1]["resume_entry"]["global_objective"] == "完成连续记忆修复"
-
-    resumed = apply_task_event(
-        side,
-        event("side:pop", "side_task_completed", postcondition_satisfied=True),
-    )["capsule"]
-    assert resumed["objective"] == "完成连续记忆修复"
-    assert resumed["suspended_task_stack"] == []
-    assert resumed["active_local_delta"]["kind"] == "resume"
-
-
-def test_model_context_is_global_first_and_does_not_duplicate_current_turn_text() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event("order:start", "task_observed", objective="完成稳定的整体目标"),
-    )
-    updated = apply_task_event(
-        capsule,
-        event(
-            "order:local",
-            "task_observed",
-            objective="这一句只应作为局部增量",
-            intent_kind="ambiguous",
-            intent_confidence="low",
-            intent_source="fallback",
-        ),
-    )["capsule"]
-    context = build_task_capsule_context(updated, [])
-    payload = json.loads(context["entry"]["value"].split("\n", 1)[1])
-
-    assert payload["reading_order"][0] == "global_goal_anchor"
-    assert payload["global_goal_anchor"]["objective"] == "完成稳定的整体目标"
-    assert payload["active_local_delta"]["turn_ref"] == "order:local"
-    assert "text" not in payload["active_local_delta"]
-    assert "这一句只应作为局部增量" not in context["entry"]["value"]
-
-
-def test_reusable_exact_source_triggers_reuse_before_regenerate() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event(
-            "reuse:start",
-            "task_observed",
-            objective="更新已有配置",
-            reuse_candidates=[
-                {
-                    "record_id": "artifact-existing",
-                    "path": "C:/fixture/existing.toml",
-                    "sha256": "a" * 64,
-                    "eligible_for_current_reuse": True,
-                }
+            "packing-plan:start",
+            "progress_snapshot",
+            objective="装柜算法优化方案",
+            plan_steps=[
+                {"id": "task-1", "text": "Task 1: 取得完整计划", "status": "completed"},
+                {"id": "task-2", "text": "Task 2: 修复布局算法", "status": "in_progress"},
+                {"id": "task-3", "text": "Task 3: 验证 release", "status": "pending"},
             ],
         ),
     )
     transition = apply_task_event(
-        capsule,
-        event("reuse:select", "candidate_selected", current_step="准备配置内容"),
+        current,
+        event(
+            "packing-plan:tool-result",
+            "tool_result_received",
+            outcome="completed",
+            postcondition_satisfied=False,
+        ),
     )
     reminders = build_dynamic_reminders(transition["capsule"], transition)
 
-    assert reminders[0]["trigger"] == "reuse_before_regenerate"
-    context = build_task_capsule_context(
-        reminders[0]["capsule_snapshot"],
-        [{key: value for key, value in reminders[0].items() if key != "capsule_snapshot"}],
-    )
-    assert "C:/fixture/existing.toml" in context["entry"]["value"]
+    assert transition["capsule"]["next_action"] == "Task 2: 修复布局算法"
+    assert reminders[0]["trigger"] == "plan_continuation_required"
+    assert "verify the current result" in reminders[0]["required_action"]
+    assert "Task 2: 修复布局算法" in reminders[0]["required_action"]
 
 
-def test_new_substantive_task_supersedes_stale_working_set() -> None:
+def test_explicit_marker_cannot_supersede_stale_working_set_without_receipt() -> None:
     stale = new_task_capsule(
         write_route(),
         event(
@@ -481,6 +525,7 @@ def test_new_substantive_task_supersedes_stale_working_set() -> None:
         ),
     )["capsule"]
 
+    source_text = "比较数据库记忆与语义文件记忆"
     response = process_worker_request(
         {
             "op": "observe",
@@ -493,11 +538,20 @@ def test_new_substantive_task_supersedes_stale_working_set() -> None:
             "task_event": event(
                 "fresh:start",
                 "task_observed",
-                objective="比较数据库记忆与语义文件记忆",
+                objective=source_text,
                 intent_kind="new_task",
                 intent_confidence="high",
                 intent_source="explicit_marker",
                 intent_reason_codes=["explicit_global_replacement"],
+                event_origin="current_user_input",
+                relation_nonce="explicit-marker-is-not-authority",
+                source_units=[
+                    {
+                        "id": "fresh:start:user-request",
+                        "source_role": "current_user_request",
+                        "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                    }
+                ],
                 reviewed_against={
                     "capsule_id": stale["capsule_id"],
                     "goal_revision": stale["goal_revision"],
@@ -507,12 +561,9 @@ def test_new_substantive_task_supersedes_stale_working_set() -> None:
         }
     )
 
-    fresh = response["capsule"]
-    assert fresh["capsule_id"] != stale["capsule_id"]
-    assert fresh["objective"] == "比较数据库记忆与语义文件记忆"
-    assert fresh["supersedes_capsule_id"] == stale["capsule_id"]
-    assert fresh["unresolved_failures"] == []
-    assert "旧 R5 修复完成" not in response["additional_context_entry"]["value"]
+    assert response["decision"]["decision"] == "safe_readonly"
+    assert response["capsule"] == stale
+    assert response["transition"]["changed"] is False
 
 
 def test_continue_ack_does_not_replace_the_active_goal() -> None:
@@ -521,6 +572,7 @@ def test_continue_ack_does_not_replace_the_active_goal() -> None:
         event("ack:start", "task_observed", objective="修复并验证工作记忆"),
     )
 
+    source_text = "可以，继续"
     response = process_worker_request(
         {
             "op": "observe",
@@ -528,19 +580,24 @@ def test_continue_ack_does_not_replace_the_active_goal() -> None:
             "task_event": event(
                 "ack:continue",
                 "task_observed",
-                objective="可以，继续",
+                objective=source_text,
                 intent_kind="continue_ack",
+                event_origin="current_user_input",
+                source_units=[
+                    {
+                        "id": "ack:continue:user-request",
+                        "source_role": "current_user_request",
+                        "text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                    }
+                ],
             ),
             "capsule": capsule,
         }
     )
 
     assert response["capsule"]["objective"] == "修复并验证工作记忆"
-    assert response["capsule"]["last_user_delta"] == {
-        "kind": "continue_ack",
-        "text": "可以，继续",
-        "turn_ref": "ack:continue",
-    }
+    assert response["decision"]["decision"] == "safe_readonly"
+    assert response["capsule"] == capsule
 
 
 def test_all_verified_acceptance_items_retire_without_adapter_flag() -> None:
@@ -685,7 +742,9 @@ def test_context_epoch_changes_only_for_global_or_validity_changes() -> None:
     progressed = progress_transition["capsule"]
     assert progressed["context_epoch"]["epoch_id"] == initial_epoch
     assert progressed["workspace_review_required"] is False
-    assert build_dynamic_reminders(progressed, progress_transition) == []
+    progress_reminders = build_dynamic_reminders(progressed, progress_transition)
+    assert progress_reminders[0]["trigger"] == "action_alignment_review_required"
+    assert progress_reminders[0]["timing"] == "next_model_boundary_after_dispatch"
 
     refined = apply_task_event(
         progressed,
@@ -822,7 +881,7 @@ def test_working_frame_preserves_goal_outputs_purpose_and_stop_condition() -> No
     assert "实现与回归均通过后停止扩张" in context["entry"]["value"]
 
 
-def test_dispatched_action_is_bound_to_the_earliest_acceptance_item() -> None:
+def test_dispatched_action_without_explicit_ids_remains_unbound() -> None:
     capsule = new_task_capsule(
         write_route(),
         event(
@@ -848,9 +907,42 @@ def test_dispatched_action_is_bound_to_the_earliest_acceptance_item() -> None:
     assert active["current_action"] == {
         "text": "修改连续记忆 reducer",
         "serves_output_ids": [],
-        "serves_criterion_ids": ["behavior-fixed"],
-        "reason": "serves_acceptance_criterion:behavior-fixed",
+        "serves_criterion_ids": [],
+        "reason": "unbound_action",
+        "binding_source": "unbound",
+        "state_progress_allowed": False,
     }
+
+
+@pytest.mark.parametrize("acceptance_id", [None, "missing-criterion"])
+def test_result_without_an_exact_criterion_id_cannot_advance_progress(
+    acceptance_id: str | None,
+) -> None:
+    capsule = new_task_capsule(
+        write_route(),
+        event(
+            "unbound-result:start",
+            "task_observed",
+            objective="实现并验证工作记忆",
+            acceptance_criteria=[
+                {"id": "behavior-fixed", "text": "旧目标不再污染新任务"},
+                {"id": "tests-green", "text": "真实复发测试通过"},
+            ],
+        ),
+    )
+    payload: dict[str, object] = {"postcondition_satisfied": True}
+    if acceptance_id is not None:
+        payload["acceptance_id"] = acceptance_id
+
+    updated = apply_task_event(
+        capsule,
+        event("unbound-result:complete", "tool_result_received", **payload),
+    )["capsule"]
+
+    assert [item["status"] for item in updated["acceptance_criteria"]] == [
+        "unknown",
+        "unknown",
+    ]
 
 
 def test_retired_capsule_cannot_be_reactivated_by_a_late_event() -> None:
@@ -895,9 +987,9 @@ def test_host_task_identity_prevents_cross_task_event_contamination() -> None:
 
 
 @pytest.mark.parametrize(
-    ("route", "task_event", "reason"),
+    ("route", "task_event", "reason", "expected_decision"),
     [
-        (write_route(), event("write:1", "task_observed", objective="修改 README"), "write_intent"),
+        (write_route(), event("write:1", "task_observed", objective="修改 README"), "write_intent", "observe_once"),
         (
             {
                 "edit_operation_profile": "read_only",
@@ -906,25 +998,28 @@ def test_host_task_identity_prevents_cross_task_event_contamination() -> None:
             },
             event("tool:1", "task_observed", objective="检查这个网页"),
             "tool_required",
+            "observe_once",
         ),
         (
             {"edit_operation_profile": "read_only", "action_bindings": []},
             event("long:1", "task_observed", objective="分三阶段完成并持续验证", multi_stage=True),
             "multi_stage_task",
+            "arm",
         ),
         (
             {"edit_operation_profile": "read_only", "action_bindings": []},
             event("resume:1", "task_observed", objective="继续之前未完成的任务", resume=True),
             "task_resume",
+            "arm",
         ),
     ],
 )
 def test_write_tool_long_and_resume_tasks_arm(
-    route: dict[str, object], task_event: dict[str, object], reason: str
+    route: dict[str, object], task_event: dict[str, object], reason: str, expected_decision: str
 ) -> None:
     decision = decide_task_continuity(route, task_event)
 
-    assert decision["decision"] == "arm"
+    assert decision["decision"] == expected_decision
     assert reason in decision["reasons"]
     assert decision["host_delivery"] == "ready"
 
@@ -947,6 +1042,15 @@ def test_runtime_reasons_are_declared_by_the_policy_contract() -> None:
         ({}, event("reason:open", "task_observed", objective="任务", open_loops=["x"])),
         ({}, event("reason:prior", "task_observed", objective="任务", prior_failure=True)),
         ({}, event("reason:explicit", "task_observed", objective="任务", continuity_requested=True)),
+        (
+            {"tool_surface_need": "host_plan_event"},
+            event(
+                "reason:plan",
+                "progress_snapshot",
+                objective="任务",
+                plan_steps=[{"id": "plan-1", "text": "执行计划", "status": "pending"}],
+            ),
+        ),
     ]
     emitted: set[str] = set()
     for route, task_event in probes:
@@ -1170,7 +1274,7 @@ def test_model_context_contains_progress_not_chain_of_thought() -> None:
     assert context["entry"]["kind"] == "untrusted"
     assert context["control_entry"]["kind"] == "application"
     assert "修改并验证配置" not in context["control_entry"]["value"]
-    assert "continue_task_from_evidence_entry" in context["control_entry"]["value"]
+    assert "write_preflight_review_required" in context["control_entry"]["value"]
     assert "修改并验证配置" in context["entry"]["value"]
     assert "chain-of-thought" not in context["entry"]["value"].lower()
     assert context["char_count"] <= 1800
@@ -1204,11 +1308,13 @@ def test_task_context_exposes_projection_identity_and_causal_relation() -> None:
     assert len(control["runtime_projection_source_digest"]) == 64
     assert len(evidence["full_capsule_sha256"]) == 64
     assert evidence["causal_relation"] == {
-        "status": "explicit_binding",
+        "status": "unbound",
         "specificity": "host_kind_only",
         "serves_output_ids": [],
-        "serves_criterion_ids": ["projection-verified"],
-        "reason": "serves_acceptance_criterion:projection-verified",
+        "serves_criterion_ids": [],
+        "reason": "unbound_action",
+        "binding_source": "unbound",
+        "state_progress_allowed": False,
     }
     assert control["runtime_projection_id"] == evidence["runtime_projection_id"]
     assert "实现并验证运行时投影" not in context["control_entry"]["value"]
@@ -1252,72 +1358,6 @@ def test_worker_returns_separate_small_dynamic_projection() -> None:
     assert len(dynamic_text) < len(normal_text)
 
 
-def test_host_limit_fallback_keeps_global_goal_and_next_action_model_visible() -> None:
-    capsule = new_task_capsule(
-        write_route(),
-        event(
-            "context:host-limit",
-            "task_observed",
-            objective="在长期项目中保持整体目标、处理临时问答并完成发布",
-            next_action="先判断当前输入与整体目标的关系",
-            acceptance_criteria=[
-                {"id": f"criterion-{index}", "text": "验收步骤 " + ("长内容" * 40)}
-                for index in range(18)
-            ],
-        ),
-    )
-    ambiguous = apply_task_event(
-        capsule,
-        event(
-            "context:host-limit-side",
-            "task_observed",
-            objective="临时问一个不相关的小问题",
-            intent_kind="ambiguous",
-            intent_confidence="low",
-            intent_source="fallback",
-        ),
-    )["capsule"]
-
-    context = build_task_capsule_context(
-        ambiguous,
-        [],
-        host_limits={"max_chars": 1000, "max_tokens": 850},
-    )
-    evidence = json.loads(context["entry"]["value"].split("\n", 1)[1])
-
-    assert evidence["global_goal_anchor"]["objective"] == "在长期项目中保持整体目标、处理临时问答并完成发布"
-    assert evidence["next_action"] == ambiguous["next_action"]
-    assert evidence["causal_relation"]["status"] in {
-        "fallback_objective",
-        "unresolved",
-    }
-
-
-def test_task_context_owns_host_limit_independently_from_internal_projection() -> None:
-    current = new_task_capsule(
-        write_route(),
-        event(
-            "context:projection-limit",
-            "task_observed",
-            objective="保持目标并完成验证",
-            acceptance_criteria=[{"id": "done", "text": "完成验证"}],
-        ),
-    )
-    context = build_task_capsule_context(
-        current,
-        [],
-        host_limits={"max_chars": 800, "max_tokens": 850},
-    )
-    evidence = json.loads(context["entry"]["value"].split("\n", 1)[1])
-
-    assert context["char_count"] <= 800
-    assert evidence["global_goal_anchor"]["objective"] == "保持目标并完成验证"
-    assert evidence["next_action"] == current["next_action"]
-    assert evidence["next_action"]
-    assert evidence["turn_relation"]["kind"] == "ambiguous"
-    assert context["char_count"] <= 1000
-
-
 def test_model_context_omits_empty_optionals_and_duplicate_initial_delta() -> None:
     """Catches token growth from serializing empty state and the objective twice."""
 
@@ -1335,8 +1375,9 @@ def test_model_context_omits_empty_optionals_and_duplicate_initial_delta() -> No
     payload = json.loads(context["entry"]["value"].split("\n", 1)[1])
 
     assert payload["objective"] == "修改并验证路由器"
-    assert payload["remaining_work"]
-    assert payload["next_action"]
+    assert "remaining_work" not in payload
+    assert "next_action" not in payload
+    assert "next_action_reason" not in payload
     assert payload["full_capsule_sha256"]
     for redundant in (
         "constraints",
@@ -1403,6 +1444,188 @@ def test_pending_dynamic_reminder_is_rendered_on_the_next_supported_turn() -> No
     assert "verify the semantic postcondition" in response["additional_context_entry"]["value"]
 
 
+def test_initial_write_turn_projects_pre_action_attention_without_waiting_for_tool_event() -> None:
+    response = process_worker_request(
+        {
+            "op": "observe",
+            "route_receipt": write_route(),
+            "task_event": event(
+                "attention:start",
+                "task_observed",
+                task_key="thread-attention",
+                objective="修改配置并验证写入结果",
+            ),
+            "capsule": None,
+            "host_limits": {"max_chars": 3000, "max_tokens": 850},
+        }
+    )
+    control = json.loads(
+        response["additional_context_entries"]["control"]["value"].split("\n", 1)[1]
+    )
+
+    assert control["required_action_code"] == "write_preflight_review_required"
+    assert control["required_action_timing"] == "before_first_action"
+    assert response["dynamic_reminders"] == []
+    assert response["decision"]["decision"] == "observe_once"
+    assert response["persistence"] == "turn_local"
+
+
+def test_transport_fallback_preserves_real_semantic_review_state() -> None:
+    current = new_task_capsule(
+        write_route(),
+        event(
+            "transport-semantic:start",
+            "task_observed",
+            objective="完成一个明确的长程任务",
+            continuity_requested=True,
+            acceptance_criteria=[
+                {"id": f"criterion-{index}", "text": "验收内容" * 80}
+                for index in range(12)
+            ],
+        ),
+    )
+    assert current["semantic_review_required"] is False
+
+    context = build_task_capsule_context(
+        current,
+        [],
+        host_limits={"max_chars": 900, "max_tokens": 850},
+    )
+    evidence = json.loads(context["entry"]["value"].split("\n", 1)[1])
+    control = json.loads(context["control_entry"]["value"].split("\n", 1)[1])
+
+    assert context["delivery"] in {"continuation_required", "semantic_review_required"}
+    assert evidence["semantic_review_required"] is False
+    assert control["semantic_review_required"] is False
+
+
+def test_plan_update_emits_alignment_reminder_before_next_plan_action() -> None:
+    current = new_task_capsule(
+        write_route(),
+        event("plan-reminder:start", "task_observed", objective="修改并验证配置"),
+    )
+    transition = apply_task_event(
+        current,
+        event(
+            "plan-reminder:update",
+            "progress_snapshot",
+            plan_steps=[
+                {"id": "inspect", "text": "检查配置", "status": "inferred"},
+                {"id": "patch", "text": "修改配置", "status": "unknown"},
+            ],
+            next_action="修改配置",
+        ),
+    )
+
+    reminders = build_dynamic_reminders(transition["capsule"], transition)
+
+    assert reminders[0]["trigger"] == "plan_alignment_review_required"
+    assert reminders[0]["timing"] == "before_next_plan_action"
+    assert "required output" in reminders[0]["required_action"]
+    assert "acceptance criterion" in reminders[0]["required_action"]
+
+
+def test_fallback_action_binding_triggers_review_and_discloses_dispatch_timing() -> None:
+    current = new_task_capsule(
+        write_route(),
+        event("action-reminder:start", "task_observed", objective="修改并验证配置"),
+    )
+    transition = apply_task_event(
+        current,
+        event(
+            "action-reminder:dispatch",
+            "tool_dispatched",
+            current_step="fileChange",
+        ),
+    )
+
+    assert transition["capsule"]["current_action"]["binding_source"] == "unbound"
+    reminders = build_dynamic_reminders(transition["capsule"], transition)
+    assert reminders[0]["trigger"] == "action_alignment_review_required"
+    assert reminders[0]["timing"] == "next_model_boundary_after_dispatch"
+    assert "already-started tool" in reminders[0]["required_action"]
+
+
+def test_unknown_explicit_binding_cannot_suppress_action_alignment_review() -> None:
+    current = new_task_capsule(
+        write_route(),
+        event("explicit-binding:start", "task_observed", objective="修改并验证配置"),
+    )
+    transition = apply_task_event(
+        current,
+        event(
+            "explicit-binding:selected",
+            "candidate_selected",
+            next_action="修改配置",
+            serves_criterion_ids=["criterion-that-does-not-exist"],
+        ),
+    )
+
+    assert transition["capsule"]["current_action"]["binding_source"] == (
+        "explicit_event_unresolved"
+    )
+    assert transition["capsule"]["current_action"]["unresolved_binding_ids"] == [
+        "criterion-that-does-not-exist"
+    ]
+    reminders = build_dynamic_reminders(transition["capsule"], transition)
+    assert reminders[0]["trigger"] == "action_alignment_review_required"
+    assert reminders[0]["timing"] == "before_tool_dispatch"
+
+
+def test_known_explicit_binding_suppresses_redundant_alignment_review() -> None:
+    current = new_task_capsule(
+        write_route(),
+        event(
+            "known-binding:start",
+            "task_observed",
+            objective="修改并验证配置",
+            acceptance_criteria=[
+                {"id": "write_applied", "text": "配置修改已验证"},
+            ],
+        ),
+    )
+    transition = apply_task_event(
+        current,
+        event(
+            "known-binding:selected",
+            "candidate_selected",
+            next_action="修改配置",
+            serves_criterion_ids=["write_applied"],
+        ),
+    )
+
+    assert transition["capsule"]["current_action"]["binding_source"] == "explicit_event"
+    assert build_dynamic_reminders(transition["capsule"], transition) == []
+
+
+def test_finalization_with_correction_emits_capability_neutral_review_reminder() -> None:
+    current = new_task_capsule(
+        write_route(),
+        event(
+            "finalization-review:start",
+            "task_observed",
+            objective="完成代码修改并给出最终交付说明",
+        ),
+    )
+    current["goal_deltas"] = [
+        {"kind": "correction", "text": "旧交付措辞已被否决"},
+    ]
+    current["remaining_work"] = []
+    transition = {
+        "event_type": "stage_exit",
+        "transition_reasons": [],
+    }
+    reminders = build_dynamic_reminders(current, transition)
+
+    assert reminders[0]["trigger"] == "finalization_surface_review_required"
+    assert reminders[0]["required_action"] == (
+        "review reader-facing final surfaces against the accepted state, remove "
+        "rejected-alternative residue, then read them back"
+    )
+    assert reminders[0]["timing"] == "before_final_delivery"
+    assert reminders[0]["context_epoch_id"] == current["context_epoch"]["epoch_id"]
+
+
 def test_jsonl_worker_keeps_state_external_and_returns_one_context_entry() -> None:
     request = {
         "id": "worker:1",
@@ -1425,8 +1648,9 @@ def test_jsonl_worker_keeps_state_external_and_returns_one_context_entry() -> No
     assert completed.returncode == 0, completed.stderr
     response = json.loads(completed.stdout)
     assert response["id"] == "worker:1"
-    assert response["result"]["decision"]["decision"] == "arm"
+    assert response["result"]["decision"]["decision"] == "observe_once"
     assert response["result"]["capsule"]["lifecycle"] == "ARMED"
+    assert response["result"]["persistence"] == "turn_local"
     assert response["result"]["additional_context_entry"]["kind"] == "untrusted"
     assert response["result"]["additional_context_entries"]["control"]["kind"] == "application"
     assert response["result"]["additional_context_entries"]["evidence"]["kind"] == "untrusted"

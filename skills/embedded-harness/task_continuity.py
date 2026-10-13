@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from runtime_projection import project_runtime
+from runtime_projection import classify_finalization_review_need, project_runtime
 
 
 DECISION_SCHEMA = "cbh.task_continuity_decision.v1"
@@ -30,6 +30,7 @@ PAGE_SCHEMA = "cbh.transport_page.v1"
 WORKER_SCHEMA = "cbh.task_continuity_worker_response.v1"
 CONTEXT_EPOCH_SCHEMA = "cbh.context_epoch.v1"
 WORKSPACE_ANCHOR_SCHEMA = "cbh.workspace_fact_anchor.v1"
+TURN_RELATION_RECEIPT_SCHEMA = "cbh.turn_relation_receipt.v1"
 
 LIFECYCLES = {"DORMANT", "ARMED", "ACTIVE", "VERIFYING", "RETIRED"}
 INTENT_KINDS = {
@@ -41,7 +42,13 @@ INTENT_KINDS = {
     "ambiguous",
 }
 RELATION_CONFIDENCES = {"low", "medium", "high"}
-RELATION_SOURCES = {"fallback", "explicit_marker", "semantic_review", "legacy_projection"}
+RELATION_SOURCES = {
+    "fallback",
+    "explicit_marker",
+    "semantic_review",
+    "typed_receipt",
+    "legacy_projection",
+}
 DEFAULT_MAX_CHARS = 20_000
 DEFAULT_MAX_ITEMS = 100
 MAX_EVENT_HISTORY = 256
@@ -74,11 +81,22 @@ _TOOL_PROMPT = re.compile(
     r"(?i)(检查|打开|搜索|运行|执行|验证|抓取|下载|调用|浏览|登录|"
     r"\b(?:inspect|check|open|search|run|execute|verify|fetch|download|browse|login|tool)\b)"
 )
-_LONG_PROMPT = re.compile(
-    r"(?i)(分阶段|多阶段|持续|长程|直到|做完|完成后|然后|并且|继续执行|"
-    r"\b(?:multi[- ]stage|long[- ]running|continue until|do not stop|after that|then)\b)"
-)
-_RESUME_PROMPT = re.compile(r"(?i)(继续|接续|恢复|未完成|中断|\b(?:resume|continue|interrupted)\b)")
+_NON_TOOL_HOST_SURFACES = {
+    "",
+    "none",
+    "not_required",
+    "host_lifecycle_event",
+    "host_plan_event",
+}
+_PERSISTENT_REASONS = {
+    "multi_stage_task",
+    "task_resume",
+    "long_running_task",
+    "open_loop",
+    "prior_failure",
+    "explicit_request",
+    "plan_observed",
+}
 _LEGACY_GOAL_REVISION_PROMPT = re.compile(
     r"(?i)(不对|不是.+而是|做偏了|判断逻辑.+窄|完全不符合预期|"
     r"重点(?:是|中的重点)|需求.+不是|应该.+而不是|"
@@ -337,6 +355,126 @@ def _turn_relation(
     return relation
 
 
+def _source_units(task_event: Mapping[str, Any]) -> list[dict[str, Any]]:
+    values = task_event.get("source_units")
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return []
+    return [
+        {
+            key: _copy(unit.get(key))
+            for key in ("id", "source_role", "text_sha256")
+            if unit.get(key) is not None
+        }
+        for unit in values
+        if isinstance(unit, Mapping)
+    ][:8]
+
+
+def _requires_relation_binding_event(task_event: Mapping[str, Any]) -> bool:
+    return bool(
+        task_event.get("event_origin") == "current_user_input"
+        or any(
+            unit.get("source_role") == "current_user_request"
+            for unit in _source_units(task_event)
+        )
+    )
+
+
+def _derived_relation_nonce(
+    task_event: Mapping[str, Any], capsule: Mapping[str, Any]
+) -> str:
+    return _sha256_text(
+        _canonical_json(
+            {
+                "task_key": task_event.get("task_key"),
+                "event_id": _event_id(task_event),
+                "capsule_id": capsule.get("capsule_id"),
+                "goal_revision": int(capsule.get("goal_revision") or 1),
+                "source_units": _source_units(task_event),
+            }
+        )
+    )[:24]
+
+
+def _validated_turn_relation_receipt(
+    task_event: Mapping[str, Any], capsule: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Validate one current-turn relation receipt without granting authority."""
+
+    receipt = task_event.get("turn_relation_receipt")
+    if not isinstance(receipt, Mapping) or not isinstance(capsule, Mapping):
+        return None
+    relation_nonce = _bounded_text(task_event.get("relation_nonce"), 256)
+    if (
+        receipt.get("schema") != TURN_RELATION_RECEIPT_SCHEMA
+        or not relation_nonce
+        or _bounded_text(receipt.get("relation_nonce"), 256) != relation_nonce
+        or _bounded_text(receipt.get("candidate_task_id"), 160)
+        != _bounded_text(capsule.get("capsule_id"), 160)
+        or _bounded_text(receipt.get("target_task_id"), 160)
+        != _bounded_text(capsule.get("capsule_id"), 160)
+        or int(receipt.get("expected_goal_revision") or 0)
+        != int(capsule.get("goal_revision") or 1)
+    ):
+        return None
+    relation_kind = _bounded_text(receipt.get("relation_kind"), 64)
+    if relation_kind not in INTENT_KINDS:
+        return None
+    raw_source_ids = receipt.get("source_unit_ids")
+    source_units = task_event.get("source_units")
+    if (
+        not isinstance(raw_source_ids, Sequence)
+        or isinstance(raw_source_ids, (str, bytes))
+        or not raw_source_ids
+        or not isinstance(source_units, Sequence)
+        or isinstance(source_units, (str, bytes))
+    ):
+        return None
+    source_by_id = {
+        _bounded_text(unit.get("id"), 256): unit
+        for unit in source_units
+        if isinstance(unit, Mapping) and _bounded_text(unit.get("id"), 256)
+    }
+    source_ids = list(dict.fromkeys(_bounded_text(value, 256) for value in raw_source_ids))
+    if not source_ids or any(source_id not in source_by_id for source_id in source_ids):
+        return None
+    objective_sha256 = _sha256_text(
+        str(task_event.get("objective") or task_event.get("prompt") or "")
+    )
+    for source_id in source_ids:
+        unit = source_by_id[source_id]
+        digest = _bounded_text(unit.get("text_sha256"), 64)
+        if (
+            unit.get("source_role") != "current_user_request"
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or digest != objective_sha256
+        ):
+            return None
+    raw_ambiguity = receipt.get("ambiguity_codes") or []
+    ambiguity_codes = (
+        [
+            text
+            for text in (_bounded_text(value, 160) for value in raw_ambiguity)
+            if text
+        ][:8]
+        if isinstance(raw_ambiguity, Sequence)
+        and not isinstance(raw_ambiguity, (str, bytes))
+        else []
+    )
+    if ambiguity_codes and relation_kind != "ambiguous":
+        return None
+    return {
+        "schema": TURN_RELATION_RECEIPT_SCHEMA,
+        "relation_nonce": relation_nonce,
+        "candidate_task_id": capsule.get("capsule_id"),
+        "expected_goal_revision": int(capsule.get("goal_revision") or 1),
+        "relation_kind": relation_kind,
+        "target_task_id": capsule.get("capsule_id"),
+        "source_unit_ids": source_ids,
+        "ambiguity_codes": ambiguity_codes,
+    }
+
+
 def _relation_is_current(
     relation: Mapping[str, Any], capsule: Mapping[str, Any]
 ) -> bool:
@@ -357,7 +495,7 @@ def _global_replacement_allowed(
     source = relation.get("source")
     if source == "semantic_review" and relation.get("semantic_review_passed") is not True:
         return False
-    return source in {"explicit_marker", "semantic_review"} and _relation_is_current(
+    return source == "typed_receipt" and _relation_is_current(
         relation, capsule
     )
 
@@ -420,6 +558,16 @@ def _binding_ids(route_receipt: Mapping[str, Any]) -> set[str]:
     }
 
 
+def _event_binding_ids(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [
+        text
+        for text in (_bounded_text(item, 160) for item in value)
+        if text
+    ][:MAX_CONTEXT_LIST_ITEMS]
+
+
 def _decision_reasons(
     route_receipt: Mapping[str, Any], task_event: Mapping[str, Any]
 ) -> list[str]:
@@ -449,15 +597,15 @@ def _decision_reasons(
         "unchanged_dispatch_repeated",
         "transport_threshold_crossed",
     }
-    route_tool = tool_surface not in {"", "none", "not_required"} or bool(
+    route_tool = tool_surface not in _NON_TOOL_HOST_SURFACES or bool(
         _binding_ids(route_receipt) & _TOOL_ACTIONS
     )
     if bool(task_event.get("tool_required")) or tool_event or route_tool or _TOOL_PROMPT.search(objective):
         reasons.append("tool_required")
 
-    if bool(task_event.get("multi_stage")) or _LONG_PROMPT.search(objective):
+    if bool(task_event.get("multi_stage")):
         reasons.append("multi_stage_task")
-    if bool(task_event.get("resume")) or event_type in {"task_interrupted", "continuation_required"} or _RESUME_PROMPT.search(objective):
+    if bool(task_event.get("resume")) or event_type in {"task_interrupted", "continuation_required"}:
         reasons.append("task_resume")
     if bool(task_event.get("long_running")):
         reasons.append("long_running_task")
@@ -467,6 +615,14 @@ def _decision_reasons(
         reasons.append("prior_failure")
     if task_event.get("continuity_requested") is True:
         reasons.append("explicit_request")
+    plan_steps = task_event.get("plan_steps")
+    if (
+        event_type == "progress_snapshot"
+        and isinstance(plan_steps, Sequence)
+        and not isinstance(plan_steps, (str, bytes))
+        and any(isinstance(item, Mapping) for item in plan_steps)
+    ):
+        reasons.append("plan_observed")
     return list(dict.fromkeys(reasons))
 
 
@@ -484,13 +640,28 @@ def decide_task_continuity(
     event_id = _event_id(task_event)
     reasons = _decision_reasons(route_receipt, task_event)
     lifecycle = str(capsule.get("lifecycle")) if isinstance(capsule, Mapping) else None
-    if lifecycle in {"ARMED", "ACTIVE", "VERIFYING"}:
+    if (
+        lifecycle in {"ARMED", "ACTIVE", "VERIFYING"}
+        and _requires_relation_binding_event(task_event)
+        and task_event.get("relation_commit_validated") is not True
+    ):
+        decision = "safe_readonly"
+        reasons = ["turn_relation_receipt_required"]
+        host_delivery = "ready"
+    elif lifecycle in {"ARMED", "ACTIVE", "VERIFYING"}:
         decision = "continue"
         if not reasons:
             reasons = ["existing_active_capsule"]
         host_delivery = "ready"
-    elif reasons:
+    elif not _bounded_text(task_event.get("objective") or task_event.get("prompt")):
+        decision = "dormant"
+        reasons = []
+        host_delivery = "not_needed"
+    elif _PERSISTENT_REASONS.intersection(reasons):
         decision = "arm"
+        host_delivery = "ready"
+    elif reasons:
+        decision = "observe_once"
         host_delivery = "ready"
     elif (
         _intent_kind(task_event) in {"continue_ack", "ambiguous"}
@@ -528,18 +699,7 @@ def _normalize_criteria(
                 text = _bounded_text(item, 800)
             if criterion_id and text:
                 normalized.append({"id": criterion_id, "text": text, "status": "unknown"})
-    if normalized:
-        return normalized
-    if write_intent:
-        return [
-            {"id": "write_applied", "text": "requested mutation is applied", "status": "unknown"},
-            {"id": "write_verified", "text": "mutation postcondition is verified", "status": "unknown"},
-        ]
-    if tool_required:
-        return [
-            {"id": "tool_result_observed", "text": "required tool result is observed and checked", "status": "unknown"}
-        ]
-    return [{"id": "task_goal", "text": "task objective is satisfied", "status": "unknown"}]
+    return normalized
 
 
 def _normalize_plan_steps(plan_steps: Any) -> list[dict[str, Any]]:
@@ -566,6 +726,19 @@ def _normalize_plan_steps(plan_steps: Any) -> list[dict[str, Any]]:
                 }
             )
     return normalized
+
+
+def _remaining_plan_steps(capsule: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        _copy(item)
+        for item in capsule.get("plan_steps") or []
+        if isinstance(item, Mapping)
+        and item.get("status") not in {"completed", "inferred"}
+    ]
+
+
+def _first_pending_plan_step(capsule: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    return next(iter(_remaining_plan_steps(capsule)), None)
 
 
 def _normalize_required_outputs(outputs: Any) -> list[dict[str, Any]]:
@@ -900,6 +1073,8 @@ def new_task_capsule(
     if decision["decision"] == "dormant":
         raise ValueError("cannot create a capsule for a dormant task")
     objective = _bounded_text(task_event.get("objective") or task_event.get("prompt"))
+    if not objective:
+        raise ValueError("task_objective_required")
     event_id = _event_id(task_event)
     task_key = _canonical_json(
         {
@@ -910,6 +1085,7 @@ def new_task_capsule(
     )
     task_key_sha256 = _sha256_text(task_key)
     reasons = set(decision["reasons"])
+    plan_steps = _normalize_plan_steps(task_event.get("plan_steps"))
     criteria = _normalize_criteria(
         task_event.get("acceptance_criteria"),
         write_intent="write_intent" in reasons,
@@ -960,7 +1136,7 @@ def new_task_capsule(
             "receipt_sha256": None,
         },
         "acceptance_criteria": criteria,
-        "plan_steps": [],
+        "plan_steps": plan_steps,
         "constraints": [
             _bounded_text(value, 800)
             for value in (task_event.get("constraints") or [])
@@ -1013,10 +1189,23 @@ def new_task_capsule(
         "reminder_state": {"emitted": []},
         "authority": {"granted": False, "consumed": False, "source": "none"},
         "persistence": "process_local_only",
+        "persistence_scope": (
+            "turn_local" if decision["decision"] == "observe_once" else "cross_turn"
+        ),
     }
     _progress_lists(capsule)
+    first_plan = _first_pending_plan_step(capsule)
     first = _first_remaining(capsule)
-    capsule["next_action"] = first.get("text") if first else None
+    capsule["next_action"] = (
+        first_plan.get("text") if first_plan else first.get("text") if first else None
+    )
+    capsule["next_action_reason"] = (
+        "earliest_incomplete_plan_step"
+        if first_plan
+        else "earliest_incomplete_acceptance_item"
+        if first
+        else None
+    )
     relation = _turn_relation(task_event, capsule)
     capsule["global_goal_anchor"] = _global_goal_anchor(capsule)
     capsule["active_local_delta"] = _local_delta(task_event, relation)
@@ -1035,6 +1224,9 @@ def initialize_task_capsule(
     bootstrap = _copy(task_event)
     bootstrap["event_id"] = f"{_event_id(task_event)}:activation"
     bootstrap["type"] = "task_observed"
+    if _event_type(task_event) == "progress_snapshot" and task_event.get("plan_steps"):
+        bootstrap["continuity_requested"] = True
+        bootstrap["multi_stage"] = True
     capsule = new_task_capsule(route_receipt, bootstrap)
     transition = apply_task_event(capsule, task_event)
     return transition["capsule"], transition
@@ -1047,12 +1239,11 @@ def _set_criterion_status(
         raise ValueError("invalid progress status")
     criteria = capsule.get("acceptance_criteria") or []
     selected: dict[str, Any] | None = None
-    if criterion_id:
-        selected = next(
-            (item for item in criteria if str(item.get("id")) == criterion_id), None
-        )
-    if selected is None:
-        selected = next((item for item in criteria if item.get("status") != "verified"), None)
+    if not criterion_id:
+        return False
+    selected = next(
+        (item for item in criteria if str(item.get("id")) == criterion_id), None
+    )
     if selected is None or selected.get("status") == status:
         return False
     selected["status"] = status
@@ -1253,35 +1444,76 @@ def apply_task_event(
             else None
         )
     if event_type in {"candidate_selected", "preflight_completed", "tool_dispatched"}:
-        first_pending = _first_remaining(updated)
-        pending_output = next(
-            (
-                item
-                for item in (updated.get("required_outputs") or [])
-                if isinstance(item, Mapping) and item.get("status") != "verified"
-            ),
-            None,
-        )
         action_text = _bounded_text(
             task_event.get("current_step")
             or task_event.get("next_action")
             or event_type,
             800,
         )
-        criterion_ids = [str(first_pending.get("id"))] if first_pending else []
-        output_ids = [str(pending_output.get("id"))] if pending_output else []
-        if criterion_ids:
+        explicit_binding = any(
+            key in task_event
+            for key in ("serves_output_ids", "serves_criterion_ids")
+        )
+        if explicit_binding:
+            requested_output_ids = _event_binding_ids(
+                task_event.get("serves_output_ids")
+            )
+            requested_criterion_ids = _event_binding_ids(
+                task_event.get("serves_criterion_ids")
+            )
+            known_output_ids = {
+                str(item.get("id"))
+                for item in updated.get("required_outputs") or []
+                if isinstance(item, Mapping) and item.get("id") is not None
+            }
+            known_criterion_ids = {
+                str(item.get("id"))
+                for item in updated.get("acceptance_criteria") or []
+                if isinstance(item, Mapping) and item.get("id") is not None
+            }
+            output_ids = [
+                value for value in requested_output_ids if value in known_output_ids
+            ]
+            criterion_ids = [
+                value
+                for value in requested_criterion_ids
+                if value in known_criterion_ids
+            ]
+            unresolved_binding_ids = [
+                value
+                for value in [*requested_output_ids, *requested_criterion_ids]
+                if value not in {*known_output_ids, *known_criterion_ids}
+            ]
+            binding_source = (
+                "explicit_event"
+                if (output_ids or criterion_ids) and not unresolved_binding_ids
+                else "explicit_event_unresolved"
+            )
+        else:
+            criterion_ids = []
+            output_ids = []
+            binding_source = "unbound"
+            unresolved_binding_ids = []
+        explicit_reason = _bounded_text(task_event.get("action_binding_reason"), 320)
+        if explicit_reason:
+            reason = explicit_reason
+        elif criterion_ids:
             reason = f"serves_acceptance_criterion:{criterion_ids[0]}"
         elif output_ids:
             reason = f"serves_required_output:{output_ids[0]}"
         else:
-            reason = "serves_task_objective"
-        updated["current_action"] = {
+            reason = "unbound_action"
+        current_action = {
             "text": action_text,
             "serves_output_ids": output_ids,
             "serves_criterion_ids": criterion_ids,
             "reason": reason,
+            "binding_source": binding_source,
+            "state_progress_allowed": binding_source == "explicit_event",
         }
+        if unresolved_binding_ids:
+            current_action["unresolved_binding_ids"] = unresolved_binding_ids
+        updated["current_action"] = current_action
         updated["next_action_reason"] = (
             _bounded_text(task_event.get("next_action_reason"), 320)
             if task_event.get("next_action") is not None
@@ -1309,6 +1541,8 @@ def apply_task_event(
             status,
         ):
             progress_delta.append(f"criterion_{status}")
+        else:
+            reasons.append("result_unbound_to_acceptance")
         updated["lifecycle"] = "VERIFYING"
         reasons.append("result_requires_acceptance_reconciliation")
     elif event_type == "verifier_pending":
@@ -1323,6 +1557,8 @@ def apply_task_event(
             status,
         ):
             progress_delta.append(f"criterion_{status}")
+        else:
+            reasons.append("verifier_unbound_to_acceptance")
         if satisfied:
             updated["blocking_condition"] = None
         updated["lifecycle"] = "VERIFYING"
@@ -1438,8 +1674,13 @@ def apply_task_event(
         reasons.append("event_recorded_without_semantic_promotion")
 
     _progress_lists(updated)
+    remaining_plan_steps = _remaining_plan_steps(updated)
     all_verified = bool(updated["acceptance_criteria"]) and not updated["remaining_work"]
-    can_retire = all_verified and not updated.get("blocking_condition")
+    can_retire = (
+        all_verified
+        and not remaining_plan_steps
+        and not updated.get("blocking_condition")
+    )
     if event_type in {"verifier_completed", "task_complete_requested", "stage_exit"}:
         if can_retire and (
             event_type == "verifier_completed"
@@ -1458,8 +1699,12 @@ def apply_task_event(
             updated["lifecycle"] = "VERIFYING"
 
     if updated["lifecycle"] != "RETIRED":
+        first_plan = _first_pending_plan_step(updated)
         first = _first_remaining(updated)
-        if first is not None and "next_action" not in task_event:
+        if first_plan is not None:
+            updated["next_action"] = first_plan.get("text")
+            updated["next_action_reason"] = "earliest_incomplete_plan_step"
+        elif first is not None and "next_action" not in task_event:
             updated["next_action"] = first.get("text")
             updated["next_action_reason"] = "earliest_incomplete_acceptance_item"
     updated["progress_revision"] = int(updated.get("progress_revision") or 0) + 1
@@ -1487,7 +1732,7 @@ def reconcile_progress(
 
 def _reminder_candidate(
     capsule: Mapping[str, Any], transition: Mapping[str, Any]
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str] | None:
     event_type = str(transition.get("event_type") or "")
     last_event = capsule.get("last_event") if isinstance(capsule.get("last_event"), Mapping) else {}
     if "workspace_anchor_changed" in (transition.get("transition_reasons") or []):
@@ -1500,12 +1745,48 @@ def _reminder_candidate(
             "workspace_revalidation_required",
             f"workspace_revalidation:{epoch}",
             "re-read workspace-bound evidence and revalidate prior progress before reusing it as current fact",
+            "before_next_action",
         )
     if event_type == "task_observed" and capsule.get("semantic_review_required"):
         return (
             "global_alignment_required",
             f"global_alignment:{capsule.get('goal_revision')}:{last_event.get('event_id')}",
             "interpret the current turn against the stable global goal; preserve it unless current replacement evidence is explicit and reviewed",
+            "before_action_selection",
+        )
+    if event_type == "progress_snapshot" and capsule.get("plan_steps"):
+        return (
+            "plan_alignment_review_required",
+            f"plan_alignment:{capsule.get('goal_revision')}:{last_event.get('event_id')}",
+            "relate the next plan action to a required output and an acceptance criterion before executing it",
+            "before_next_plan_action",
+        )
+    action = (
+        capsule.get("current_action")
+        if isinstance(capsule.get("current_action"), Mapping)
+        else {}
+    )
+    if event_type in {"candidate_selected", "preflight_completed", "tool_dispatched"} and not capsule.get(
+        "reuse_candidates"
+    ) and (
+        action.get("binding_source") != "explicit_event"
+        or not (action.get("serves_output_ids") or action.get("serves_criterion_ids"))
+    ):
+        timing = (
+            "next_model_boundary_after_dispatch"
+            if event_type == "tool_dispatched"
+            else "before_tool_dispatch"
+        )
+        required_action = (
+            "before choosing the next action, bind it to a required output or acceptance criterion and state its semantic postcondition; this does not validate the already-started tool"
+            if event_type == "tool_dispatched"
+            else "bind the selected action to a required output or acceptance criterion and state its semantic postcondition before tool dispatch"
+        )
+        return (
+            "action_alignment_review_required",
+            f"action_alignment:{capsule.get('goal_revision')}:{last_event.get('event_id')}",
+            required_action,
+            timing,
         )
     if event_type in {"candidate_selected", "preflight_completed", "tool_dispatched"} and capsule.get(
         "reuse_candidates"
@@ -1514,12 +1795,18 @@ def _reminder_candidate(
             "reuse_before_regenerate",
             f"reuse_before_regenerate:{capsule.get('goal_revision')}:{last_event.get('event_id')}",
             "reuse or copy the exact compatible source before generating an equivalent replacement",
+            (
+                "next_model_boundary_after_dispatch"
+                if event_type == "tool_dispatched"
+                else "before_tool_dispatch"
+            ),
         )
     if event_type == "side_task_completed":
         return (
             "resume_suspended_task",
             f"resume_suspended_task:{last_event.get('event_id')}",
             "resume the preserved global task from its earliest incomplete acceptance item",
+            "before_next_action",
         )
     if event_type == "unchanged_dispatch_repeated":
         failures = capsule.get("unresolved_failures") or []
@@ -1528,12 +1815,23 @@ def _reminder_candidate(
             "unchanged_dispatch_repeated",
             f"unchanged_dispatch:{signature}",
             "select a changed, mechanically verified dispatch path before retrying",
+            "before_retry",
         )
     if event_type == "verifier_pending":
         return (
             "verifier_pending",
             f"verifier_pending:{last_event.get('event_id')}",
             "run or obtain the declared verifier before claiming completion",
+            "before_completion_claim",
+        )
+    pending_plan = _first_pending_plan_step(capsule)
+    if event_type in {"tool_result_received", "write_result_received"} and pending_plan:
+        step_text = _bounded_text(pending_plan.get("text"), 400)
+        return (
+            "plan_continuation_required",
+            f"plan_continuation:{capsule.get('goal_revision')}:{pending_plan.get('id')}",
+            f"verify the current result, then continue with the next planned step: {step_text}",
+            "before_next_plan_action",
         )
     if event_type in {"tool_result_received", "write_result_received"} and transition.get(
         "progress_delta"
@@ -1542,18 +1840,49 @@ def _reminder_candidate(
             "missing_postcondition",
             f"missing_postcondition:{last_event.get('event_id')}",
             "verify the semantic postcondition; command success alone is insufficient",
+            "before_completion_claim",
+        )
+    if event_type in {"stage_exit", "task_complete_requested"} and pending_plan:
+        return (
+            "open_plan_steps_at_stage_exit",
+            f"open_plan_steps:{capsule.get('goal_revision')}:{pending_plan.get('id')}",
+            f"continue with the earliest incomplete planned step: {_bounded_text(pending_plan.get('text'), 400)}",
+            "before_stage_exit",
         )
     if event_type in {"stage_exit", "task_complete_requested"} and capsule.get("remaining_work"):
         return (
             "open_loops_at_stage_exit",
             f"open_loops:{capsule.get('current_stage')}",
             "continue from the earliest incomplete acceptance item or report the blocker",
+            "before_stage_exit",
+        )
+    finalization_review = classify_finalization_review_need(
+        capsule,
+        finalization_event=event_type in {"stage_exit", "task_complete_requested"},
+    )
+    if finalization_review["status"] == "required" and event_type in {
+        "stage_exit",
+        "task_complete_requested",
+        "verifier_completed",
+        "write_result_received",
+    }:
+        epoch = (
+            capsule.get("context_epoch", {}).get("epoch_id")
+            if isinstance(capsule.get("context_epoch"), Mapping)
+            else "unknown"
+        )
+        return (
+            "finalization_surface_review_required",
+            f"finalization_review:{epoch}:{finalization_review.get('surface')}",
+            "review reader-facing final surfaces against the accepted state, remove rejected-alternative residue, then read them back",
+            "before_final_delivery",
         )
     if event_type in {"transport_threshold_crossed", "continuation_required"}:
         return (
             "transport_continuation_required",
             f"transport:{last_event.get('event_id')}",
             "continue with the content-bound cursor and preserve the full-result hash",
+            "before_continuation",
         )
     return None
 
@@ -1566,7 +1895,7 @@ def build_dynamic_reminders(
     candidate = _reminder_candidate(capsule, transition)
     if candidate is None:
         return []
-    trigger, base_key, required_action = candidate
+    trigger, base_key, required_action, timing = candidate
     revision = int(capsule.get("progress_revision") or 0)
     receipt_key = f"{base_key}@{revision}"
     reminder_state = capsule.get("reminder_state")
@@ -1592,6 +1921,7 @@ def build_dynamic_reminders(
             "severity": "action_required",
             "dedupe_key": base_key,
             "required_action": required_action,
+            "timing": timing,
             "expires_when": "required_action_satisfied_or_task_retired",
             "evidence_refs": list(snapshot.get("evidence_refs") or []),
             "capsule_snapshot": snapshot,
@@ -1878,6 +2208,9 @@ def build_task_capsule_context(
     )
     projection_envelope = runtime_projection["envelope"]
     causal_relation = _copy(projection_envelope["payload"]["relation"])
+    execution_attention = _copy(
+        projection_envelope["payload"].get("execution_attention") or []
+    )
     max_chars = min(3_200, _positive_int(
         host_limits.get("max_chars") if isinstance(host_limits, Mapping) else None,
         name="max_chars",
@@ -2034,6 +2367,7 @@ def build_task_capsule_context(
             {
                 "trigger": item.get("trigger"),
                 "required_action": item.get("required_action"),
+                "timing": item.get("timing"),
                 "expires_when": item.get("expires_when"),
             }
             for item in reminders[:4]
@@ -2130,7 +2464,7 @@ def build_task_capsule_context(
             "causal_relation": causal_relation,
             "workspace_fact_status": payload.get("workspace_fact_status"),
             "goal_revision": capsule.get("goal_revision"),
-            "semantic_review_required": True,
+            "semantic_review_required": bool(capsule.get("semantic_review_required")),
             "turn_relation": _copy(capsule.get("turn_relation")),
             "next_action": _bounded_text(capsule.get("next_action"), 320),
             "continuation_required": True,
@@ -2208,7 +2542,7 @@ def build_task_capsule_context(
                     ),
                     "causal_relation": compact_causal_relation,
                     "goal_revision": capsule.get("goal_revision"),
-                    "semantic_review_required": True,
+                    "semantic_review_required": bool(capsule.get("semantic_review_required")),
                     "turn_relation": relation,
                     "next_action": _bounded_text(capsule.get("next_action"), next_action_limit),
                     "continuation_required": True,
@@ -2250,12 +2584,17 @@ def build_task_capsule_context(
         value = prefix + _canonical_json(identity)
         delivery = "semantic_review_required"
     first_remaining = _first_remaining(capsule)
+    first_pending_plan = _first_pending_plan_step(capsule)
     lifecycle = str(capsule.get("lifecycle") or "ACTIVE")
     semantic_review_required = bool(capsule.get("semantic_review_required"))
     if capsule.get("workspace_review_required"):
         required_action_code = "workspace_revalidation_required"
+    elif execution_attention:
+        required_action_code = str(execution_attention[0].get("trigger"))
     elif semantic_review_required:
         required_action_code = "adjudicate_current_turn_without_replacing_global_goal"
+    elif first_pending_plan is not None:
+        required_action_code = "continue_pending_plan_before_completion"
     elif lifecycle == "VERIFYING":
         required_action_code = "verify_semantic_postcondition_before_completion"
     elif capsule.get("unresolved_failures"):
@@ -2292,7 +2631,11 @@ def build_task_capsule_context(
         "semantic_review_required": bool(capsule.get("semantic_review_required")),
         "workspace_review_required": bool(capsule.get("workspace_review_required")),
         "required_action_code": required_action_code,
-        "earliest_pending_id": first_remaining.get("id") if first_remaining else None,
+        "earliest_pending_id": (
+            first_pending_plan.get("id")
+            if first_pending_plan is not None
+            else first_remaining.get("id") if first_remaining else None
+        ),
         "reminder_triggers": [
             str(item.get("trigger"))
             for item in reminders[:4]
@@ -2302,6 +2645,10 @@ def build_task_capsule_context(
         "authority_granted": False,
         "boundary": "Use the separate untrusted evidence entry for task text. Preserve permissions and verify postconditions before completion.",
     }
+    if execution_attention:
+        control_payload["required_action_timing"] = execution_attention[0].get(
+            "timing"
+        )
     if semantic_review_required:
         control_payload["turn_relation_options"] = [
             "global_goal_delta",
@@ -2329,6 +2676,55 @@ def build_task_capsule_context(
     }
 
 
+def build_task_candidate_context(
+    capsule: Mapping[str, Any], task_event: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Project an unbound turn without presenting it as committed task state."""
+
+    source_units = _source_units(task_event)[:4]
+    source_unit_ids = [str(unit.get("id")) for unit in source_units if unit.get("id")]
+    candidate = {
+        "schema": "cbh.task_candidate_evidence.v1",
+        "active_task": {
+            "capsule_id": capsule.get("capsule_id"),
+            "goal_revision": int(capsule.get("goal_revision") or 1),
+            "lifecycle": capsule.get("lifecycle"),
+            "objective": _bounded_text(capsule.get("objective"), 240),
+            "next_action": _bounded_text(capsule.get("next_action"), 120),
+        },
+        "candidate_turn": {
+            "event_id": _event_id(task_event),
+            "relation_nonce": _bounded_text(task_event.get("relation_nonce"), 256),
+            "source_unit_ids": source_unit_ids,
+        },
+        "boundary": "unbound_readonly_comparison",
+    }
+    control = {
+        "schema": "cbh.task_relation_control.v1",
+        "required_action_code": "relation_receipt_required",
+        "relation_receipt_schema": TURN_RELATION_RECEIPT_SCHEMA,
+        "candidate_task_id": capsule.get("capsule_id"),
+        "expected_goal_revision": int(capsule.get("goal_revision") or 1),
+        "relation_nonce": _bounded_text(task_event.get("relation_nonce"), 256),
+        "source_unit_ids": source_unit_ids,
+        "state_mutation_allowed": False,
+        "authority_granted": False,
+        "boundary": "no_state_mutation_without_bound_receipt",
+    }
+    evidence_value = "CBH unbound task-candidate evidence:\n" + _canonical_json(candidate)
+    control_value = "CBH task-relation control:\n" + _canonical_json(control)
+    return {
+        "schema": "cbh.task_capsule_context.v1",
+        "entry": {"kind": "untrusted", "value": evidence_value},
+        "control_entry": {"kind": "application", "value": control_value},
+        "char_count": len(evidence_value),
+        "control_char_count": len(control_value),
+        "estimated_tokens": _estimated_tokens(evidence_value),
+        "control_estimated_tokens": _estimated_tokens(control_value),
+        "delivery": "relation_review_required",
+    }
+
+
 def process_worker_request(
     request: Mapping[str, Any],
     *,
@@ -2345,6 +2741,15 @@ def process_worker_request(
     if workfile is not None and _workfile_transaction is None:
         if not isinstance(workfile, Mapping) or not isinstance(workfile.get("path"), str):
             raise ValueError("workfile.path must be a non-empty string")
+        if (
+            capsule is None
+            and not Path(str(workfile["path"])).exists()
+            and decide_task_continuity(route, task_event)["decision"]
+            in {"dormant", "observe_once"}
+        ):
+            request_without_workfile = dict(request)
+            request_without_workfile.pop("workfile", None)
+            return process_worker_request(request_without_workfile)
         task_key = task_event.get("task_key")
         if task_key is None:
             raise ValueError("workfile_requires_task_key")
@@ -2361,6 +2766,7 @@ def process_worker_request(
     workfile_state: dict[str, Any] | None = None
     workfile_path: Path | None = None
     workfile_scope: str | None = None
+    workfile_recovery: dict[str, Any] | None = None
     if workfile is not None:
         if not isinstance(workfile, Mapping) or not isinstance(workfile.get("path"), str):
             raise ValueError("workfile.path must be a non-empty string")
@@ -2379,7 +2785,7 @@ def process_worker_request(
         if isinstance(capsule, Mapping) and isinstance(persisted_capsule, Mapping):
             if capsule.get("capsule_id") != persisted_capsule.get("capsule_id"):
                 raise ValueError("cumcwork_capsule_identity_mismatch")
-        capsule = (
+        restored_capsule = (
             ensure_v3_capsule(
                 persisted_capsule,
                 capsule_history=workfile_state.get("capsule_history"),
@@ -2389,6 +2795,45 @@ def process_worker_request(
             if isinstance(persisted_capsule, Mapping)
             else None
         )
+        if isinstance(restored_capsule, Mapping) and not _bounded_text(
+            restored_capsule.get("objective")
+        ):
+            retired_invalid = _copy(restored_capsule)
+            retired_invalid["lifecycle"] = "RETIRED"
+            retired_invalid["next_action"] = None
+            retired_invalid["next_action_reason"] = "invalid_empty_objective_retired"
+            retired_invalid["semantic_review_required"] = False
+            retired_invalid["retirement"] = {
+                "outcome": "invalidated",
+                "reason": "invalid_empty_objective",
+                "evidence_refs": list(retired_invalid.get("evidence_refs") or []),
+            }
+            retired_invalid["last_event"] = {
+                "event_id": f"{_event_id(task_event)}:invalid-workfile-retirement",
+                "type": "invalid_capsule_retired",
+                "observed_at": task_event.get("observed_at"),
+            }
+            retired_invalid["progress_revision"] = int(
+                retired_invalid.get("progress_revision") or 0
+            ) + 1
+            retired_invalid["context_epoch"] = _derive_context_epoch(retired_invalid)
+            retirement_receipt = _workfile_transaction.append_snapshot(
+                retired_invalid,
+                (),
+                expected_head_sha256=workfile_state.get("head_sha256"),
+                expected_work_revision=int(workfile_state.get("work_revision") or 0),
+            )
+            workfile_state = _workfile_transaction.state
+            workfile_recovery = {
+                "status": "retired_invalid_empty_objective",
+                "capsule_id": retired_invalid.get("capsule_id"),
+                "work_revision": retirement_receipt.get("work_revision"),
+                "head_sha256": retirement_receipt.get("head_sha256"),
+            }
+            capsule = None
+            request = {**request, "pending_reminders": []}
+        else:
+            capsule = restored_capsule
         persisted_reminders = workfile_state.get("pending_reminders") or []
         if request.get("pending_reminders") is None:
             request = {**request, "pending_reminders": persisted_reminders}
@@ -2398,19 +2843,48 @@ def process_worker_request(
         else None
     )
     effective_event = _copy(task_event)
-    if (
+    relation_binding_required = bool(
         prior_capsule
-        and effective_event.get("intent_source") == "explicit_marker"
-        and not isinstance(effective_event.get("reviewed_against"), Mapping)
+        and prior_capsule.get("lifecycle") != "RETIRED"
+        and _requires_relation_binding_event(effective_event)
+    )
+    if relation_binding_required and not _bounded_text(
+        effective_event.get("relation_nonce"), 256
     ):
+        effective_event["relation_nonce"] = _derived_relation_nonce(
+            effective_event, prior_capsule
+        )
+    typed_relation_receipt = _validated_turn_relation_receipt(
+        effective_event, prior_capsule
+    )
+    if typed_relation_receipt is not None:
+        effective_event["intent_kind"] = typed_relation_receipt["relation_kind"]
+        effective_event["intent_confidence"] = "high"
+        effective_event["intent_source"] = "typed_receipt"
+        effective_event["intent_reason_codes"] = [
+            "typed_relation_receipt_validated",
+            *typed_relation_receipt["ambiguity_codes"],
+        ][:8]
         effective_event["reviewed_against"] = {
-            "capsule_id": prior_capsule.get("capsule_id"),
-            "goal_revision": prior_capsule.get("goal_revision"),
+            "capsule_id": typed_relation_receipt["candidate_task_id"],
+            "goal_revision": typed_relation_receipt["expected_goal_revision"],
         }
+        effective_event["semantic_review_passed"] = True
+        effective_event["relation_commit_validated"] = (
+            typed_relation_receipt["relation_kind"] != "ambiguous"
+        )
     relation = _turn_relation(effective_event, prior_capsule)
+    safe_readonly = bool(
+        relation_binding_required
+        and (
+            typed_relation_receipt is None
+            or typed_relation_receipt.get("relation_kind") == "ambiguous"
+        )
+    )
     superseding = bool(
         prior_capsule
         and prior_capsule.get("lifecycle") != "RETIRED"
+        and not safe_readonly
         and _global_replacement_allowed(relation, prior_capsule)
     )
     preserve_global_goal = bool(
@@ -2429,10 +2903,20 @@ def process_worker_request(
             *list(effective_event.get("intent_reason_codes") or [])[:7],
             "global_replacement_evidence_not_current",
         ]
-    decision = decide_task_continuity(
-        route,
-        effective_event,
-        None if superseding else prior_capsule,
+    decision = (
+        {
+            "schema": DECISION_SCHEMA,
+            "decision": "safe_readonly",
+            "reasons": ["turn_relation_receipt_required"],
+            "source_event_ids": [_event_id(effective_event)],
+            "host_delivery": "ready",
+        }
+        if safe_readonly
+        else decide_task_continuity(
+            route,
+            effective_event,
+            None if superseding else prior_capsule,
+        )
     )
     transition: dict[str, Any] | None = None
     reminders: list[dict[str, Any]] = []
@@ -2445,6 +2929,7 @@ def process_worker_request(
                     "schema",
                     "trigger",
                     "required_action",
+                    "timing",
                     "expires_when",
                     "dedupe_key",
                     "context_epoch_id",
@@ -2460,7 +2945,20 @@ def process_worker_request(
         else []
     )
     current: dict[str, Any] | None
-    if superseding:
+    if safe_readonly:
+        current = _copy(prior_capsule)
+        transition = {
+            "schema": TRANSITION_SCHEMA,
+            "capsule": current,
+            "changed": False,
+            "previous_lifecycle": str(current.get("lifecycle")),
+            "lifecycle": str(current.get("lifecycle")),
+            "progress_delta": [],
+            "event_outcome": "unbound_turn_observed_readonly",
+            "transition_reasons": ["typed_turn_relation_not_yet_validated"],
+            "event_type": _event_type(effective_event),
+        }
+    elif superseding:
         current, _ = initialize_task_capsule(route, effective_event)
         transition = {
             "schema": TRANSITION_SCHEMA,
@@ -2476,6 +2974,8 @@ def process_worker_request(
     elif capsule is None:
         if decision["decision"] != "dormant":
             current, transition = initialize_task_capsule(route, effective_event)
+            if transition is not None:
+                reminders = build_dynamic_reminders(current, transition)
         else:
             current = None
     else:
@@ -2489,14 +2989,16 @@ def process_worker_request(
                     "global_goal_preserved_pending_semantic_review"
                 ]
             reminders = build_dynamic_reminders(current, transition)
-        if reminders:
-            current = reminders[-1]["capsule_snapshot"]
-            reminders = [
-                {key: value for key, value in reminder.items() if key != "capsule_snapshot"}
-                for reminder in reminders
-            ]
+    if reminders:
+        current = reminders[-1]["capsule_snapshot"]
+        reminders = [
+            {key: value for key, value in reminder.items() if key != "capsule_snapshot"}
+            for reminder in reminders
+        ]
     context = (
-        build_task_capsule_context(
+        build_task_candidate_context(current, effective_event)
+        if safe_readonly and current is not None
+        else build_task_capsule_context(
             current,
             [*carried_reminders, *reminders],
             host_limits=request.get("host_limits") if isinstance(request.get("host_limits"), Mapping) else None,
@@ -2567,10 +3069,37 @@ def process_worker_request(
                 + context.get("control_estimated_tokens", 0)
             ),
         },
-        "persistence": "none",
+        "persistence": (
+            "turn_local"
+            if decision["decision"] == "observe_once" and current is not None
+            else "none"
+        ),
         "authority_granted": False,
     }
-    if workfile_state is not None and workfile_path is not None and current is not None:
+    if relation_binding_required and prior_capsule is not None:
+        result["relation_binding"] = {
+            "schema": "cbh.turn_relation_binding.v1",
+            "required": True,
+            "relation_nonce": effective_event.get("relation_nonce"),
+            "candidate_task_id": prior_capsule.get("capsule_id"),
+            "expected_goal_revision": int(prior_capsule.get("goal_revision") or 1),
+            "source_units": _source_units(effective_event),
+            "validated": typed_relation_receipt is not None and not safe_readonly,
+            "relation_kind": (
+                typed_relation_receipt.get("relation_kind")
+                if typed_relation_receipt is not None
+                else None
+            ),
+        }
+    if workfile_recovery is not None:
+        result["workfile_recovery"] = workfile_recovery
+    ephemeral_decision = decision["decision"] in {"observe_once", "safe_readonly"}
+    if (
+        workfile_state is not None
+        and workfile_path is not None
+        and current is not None
+        and not ephemeral_decision
+    ):
         reminders_to_persist = reminders or carried_reminders
         receipt = _workfile_transaction.append_snapshot(
             current,
@@ -2580,7 +3109,7 @@ def process_worker_request(
         )
         result["persistence"] = "local_cumcwork"
         result["workfile_receipt"] = receipt
-    elif workfile_state is not None:
+    elif workfile_state is not None and not ephemeral_decision:
         result["persistence"] = "local_cumcwork"
         result["workfile_receipt"] = {
             "schema": "cbh.cumcwork_append.v1",
@@ -2589,7 +3118,12 @@ def process_worker_request(
             "work_revision": workfile_state.get("work_revision"),
             "snapshot_sha256": workfile_state.get("snapshot_sha256"),
         }
-    if workfile_path is not None and workfile_scope is not None and current is not None:
+    if (
+        workfile_path is not None
+        and workfile_scope is not None
+        and current is not None
+        and not ephemeral_decision
+    ):
         workfile_handle = {
             "path": str(workfile_path),
             "host_task_key_sha256": workfile_scope,

@@ -82,10 +82,11 @@ foreach ($mode in $policy.search_and_learning_decision_matrix.search_modes.PSObj
 }
 
 $hasExplicitSearchIntent = $explicitSearchIntentMatches.Count -gt 0
+$ownerRepoPattern = '(?i)(?<![A-Za-z0-9_.-])[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}(?![A-Za-z0-9_.-])'
 if ($hasExplicitSearchIntent) {
   $recommendedModes += "general_web_cross_check"
 }
-if ([regex]::IsMatch($combined, '(?i)github\.com|\bGitHub\b|\u4ed3\u5e93|\u5f00\u6e90')) {
+if ([regex]::IsMatch($combined, '(?i)github\.com|\bGitHub\b|仓库|开源')) {
   $recommendedModes += "github_open_source_repository_search"
 }
 

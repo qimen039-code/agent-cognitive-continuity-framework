@@ -1,17 +1,16 @@
 # Embedded Agent Harness
 
-A low-cost, model-facing control and context layer for agent workflows. It
-routes each task through only the capabilities it needs, then returns compact
-context and boundary receipts to the host model agent. The model still plans,
-uses tools, handles errors, and writes the final answer.
+A source-preserving memory, task-state and mechanical-validation layer for
+agent workflows. The host model selects relevant sources and actions; optional
+consumers return bounded context and evidence. The model plans, uses tools,
+handles errors and writes the final answer.
 
-Default chain:
+Available integration chain (select only the parts needed by the task):
 
 ```text
 root AGENTS.md microkernel
--> deterministic intake router
--> mandatory model-layer pre-action control plane
--> lightweight routing receipt
+-> host model chooses the next action
+-> optional deterministic intake router and routing receipt
 -> event-triggered re-evaluation
 -> optional project router / project AGENTS / project memory
 -> static knowledge index / selected manual page, if project navigation is needed
@@ -30,12 +29,12 @@ Design boundaries:
 - `R4` includes `R3` change and claim gates, plus external research and verification gates.
 - If no deterministic risk rule matches, fallback review is reserved for medium-length text with fallback terms or long unclassified text. Short ordinary questions stay cheap R0 unless another rule fires.
 - `GLOBAL` memory is manual-only by default.
-- The mandatory model-layer pre-action control plane is required for nontrivial tasks: create a lightweight routing receipt, re-evaluate only on trigger events, and re-check claim/memory/version boundaries before final output.
-- `direct_outcome_first_gate` protects bounded user-visible edits from being displaced by unrequested scaffolding. After the minimum necessary read, its action binding requires the first substantive mutation to touch the requested surface; expansion needs direct failure evidence, objective cross-surface acceptance, a safety/data-integrity blocker, or explicit systemic scope.
-- R0-R5 classification always runs internally but stays silent by default in user-facing surfaces. Expose only action-changing boundaries; `debug_receipt` is for route diagnosis or explicit full-receipt requests.
+- Ordinary tasks use exposed tools and valid sources directly. Routing receipts are optional compatibility interfaces; they do not mandate another approval or a fixed planning/testing sequence.
+- User-visible edits should advance the requested surface after the necessary read. Broaden only when the goal, a concrete failure or an evidence gap requires it.
+- R0-R5 labels describe action scope when the router is called. They do not grant or revoke permission. `debug_receipt` is for route diagnosis or an explicit full-receipt request.
 - Receipt profiles keep runtime cost low: `compact_runtime` is used only when fields change the next action, `extended_governance` expands for public/framework/project-boundary work, and `debug_receipt` is only for route diagnosis or explicit full-receipt requests.
 - Do not wrap every tool call. Invoke correction only for a current candidate whose surface and profile can be mechanically identified.
-- Memory retrieval is meta-first: read `_META_INDEX.md`, a memory summary, or a router manifest before opening category indexes or capsule payloads.
+- Memory discovery may use metadata to locate sources; read known exact sources directly and expand the context needed for the current claim.
 - `memory_source_hints` bind retrieval to exact active roots. `harness_action_consumer.py` promotes exact record or anchor matches into compact model context; bounded weaker candidates are returned to the host model for semantic reranking and do not demote an exact match into mandatory manual review.
 - `action_bindings` describe work for the host model agent. They do not make ACCF an autonomous task runner and are not completion evidence until the matching model/tool path returns a receipt.
 - `task_continuity.py` is a process-local continuity reducer and adaptive transport worker. For an active long/tool/write task it keeps one stable global goal ahead of verified progress, the latest local delta, resumable side tasks, and exact reusable-source refs. An unmatched turn preserves that frame for semantic review instead of becoming a new task: the host model can treat it as a global-goal delta, a bounded side conversation that is answered without replacing the global goal, or an explicit global replacement that still needs current-frame evidence. An explicit return resumes the preserved global task. It stays dormant for answer-only turns with no active frame, stores no chain-of-thought or authority, and requires a verified host adapter before its context can be called automatically model-visible.
@@ -189,3 +188,20 @@ Configure `embedded_harness_policy.authoring.toml` for high-churn trigger and th
 - Most gate results are caller-honored by default.
 - The correction hook is nonblocking and cannot substitute for host authorization or sandboxing.
 - Published adapters are local smoke-test references, not complete cross-device or cross-client compatibility guarantees.
+
+## Source reading and optional context recall
+
+`text_source_reader.py` provides scoped structural/lexical discovery and exact
+source reads. A known small file can be read directly; repeated collections can
+use disposable packed indexes, `search --compact`, `outline`, and
+`read --scope unit|parent|file`. Scores locate candidates rather than prove
+semantic relevance or absence. Original text, encoding and selected ranges
+remain the evidence. `semantic_memory.py discover` returns compact candidates;
+`read --record-id` expands a verified selected v3 record.
+
+`context_recall.py` is an optional read-only consumer of configured native
+memory and retained public user/assistant messages. Copy and adapt
+`context_recall.local.example.json` into a private `context_recall.local.json`;
+do not publish source roots, state databases or derived catalogs. Hooks require
+compatible host configuration and fresh invocation tests. See
+`../../docs/context-recall.md`. No host callback is installed by this package.

@@ -1,201 +1,488 @@
 from __future__ import annotations
 
-import importlib.util
 import json
+import hashlib
+import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[1]
-LEDGER_TOOL = ROOT / "skills" / "embedded-harness" / "codex_session_ledger.py"
-
-
-def load_tool():
-    spec = importlib.util.spec_from_file_location("codex_session_ledger", LEDGER_TOOL)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+import codex_session_ledger as ledger
+from codex_session_ledger import build_ledger, doctor_ledger, read_jsonl, resolve_evidence
 
 
-def write_jsonl(path: Path, records: list[dict]) -> None:
-    path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n", encoding="utf-8")
+class SessionLedgerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.session = self.root / "rollout-00000000-0000-0000-0000-000000000001.jsonl"
+        self.output = self.root / "ledger"
 
+    def tearDown(self) -> None:
+        self.temp.cleanup()
 
-def read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    def write_events(self, events: list[dict]) -> None:
+        self.session.write_text(
+            "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+            encoding="utf-8",
+        )
 
+    def append_events(self, events: list[dict]) -> None:
+        with self.session.open("a", encoding="utf-8", newline="\n") as handle:
+            for event in events:
+                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-def sample_session(path: Path) -> None:
-    write_jsonl(
-        path,
-        [
+    def test_generation_manager_exposes_minimal_interface(self) -> None:
+        self.assertTrue(callable(getattr(ledger, "initialize_generation_root", None)))
+        self.assertTrue(callable(getattr(ledger, "refresh_generation", None)))
+        self.assertTrue(callable(getattr(ledger, "load_active_generation", None)))
+
+    def test_generation_root_index_routes_through_current_pointer(self) -> None:
+        self.write_events(self.base_events())
+        generation_root = self.root / "generation-root"
+
+        result = ledger.initialize_generation_root([self.session], generation_root)
+
+        self.assertIn(result["status"], {"pass", "warn"})
+        root_index = (generation_root / "_LEDGER_INDEX.md").read_text(encoding="utf-8")
+        self.assertIn("CURRENT.json", root_index)
+        self.assertIn("relative_path", root_index)
+        self.assertNotIn("turns:", root_index)
+        active_index = (
+            ledger.load_active_generation(generation_root) / "_LEDGER_INDEX.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("turns: 1", active_index)
+
+    def test_generation_refresh_appends_verified_tail_and_pairs_cross_checkpoint_output(self) -> None:
+        initial = self.base_events()[:8]
+        self.write_events(initial)
+        generation_root = self.root / "generation-root"
+        initialized = ledger.initialize_generation_root(
+            [self.session],
+            generation_root,
+            conversation_memory_id="conversation:test",
+        )
+        self.assertIn(initialized["status"], {"pass", "warn"})
+        generation_a = ledger.load_active_generation(generation_root)
+        evidence_a_path = generation_a / "evidence_refs.jsonl"
+        evidence_a_bytes = evidence_a_path.read_bytes()
+        evidence_a_count = len(read_jsonl(evidence_a_path))
+
+        self.append_events(
+            [
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-07-18T00:00:08Z",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-2",
+                        "output": [{"type": "input_text", "text": "late output"}],
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-07-18T00:00:09Z",
+                    "payload": {
+                        "type": "task_complete",
+                        "last_agent_message": "增量完成。",
+                    },
+                },
+            ]
+        )
+
+        refreshed = ledger.refresh_generation(
+            [self.session],
+            generation_root,
+            conversation_memory_id="conversation:test",
+        )
+        self.assertIn(refreshed["status"], {"pass", "warn"})
+        self.assertEqual(refreshed["refresh_strategy"], "verified_incremental_tail")
+        self.assertEqual(refreshed["resume_from_line"], len(initial) + 1)
+        self.assertEqual(refreshed["raw_lines_read"], 2)
+        self.assertEqual(refreshed["reused_evidence_refs"], evidence_a_count)
+
+        generation_b = ledger.load_active_generation(generation_root)
+        self.assertNotEqual(generation_a, generation_b)
+        self.assertEqual(evidence_a_path.read_bytes(), evidence_a_bytes)
+        evidence_b = read_jsonl(generation_b / "evidence_refs.jsonl")
+        call = next(
+            item
+            for item in evidence_b
+            if item.get("call_id") == "call-2" and item["evidence_kind"] == "tool_call"
+        )
+        output = next(
+            item
+            for item in evidence_b
+            if item.get("call_id") == "call-2" and item["evidence_kind"] == "tool_output"
+        )
+        self.assertEqual(output["paired_call_ref_id"], call["ref_id"])
+        self.assertEqual(call["paired_output_ref_ids"], [output["ref_id"]])
+        self.assertIn(
+            f"evidence_refs: {evidence_a_count + 2}",
+            (generation_b / "_LEDGER_INDEX.md").read_text(encoding="utf-8"),
+        )
+
+        doctor = doctor_ledger(generation_root)
+        self.assertNotEqual(doctor["status"], "fail")
+        resolved = resolve_evidence(generation_root, output["ref_id"], context_lines=0)
+        self.assertEqual(resolved["status"], "pass")
+        self.assertTrue(resolved["hash_match"])
+
+    def test_generation_refresh_rejects_changed_verified_prefix_without_switching(self) -> None:
+        events = self.base_events()
+        self.write_events(events)
+        generation_root = self.root / "generation-root"
+        ledger.initialize_generation_root([self.session], generation_root)
+        generation_before = ledger.load_active_generation(generation_root)
+        pointer_before = (generation_root / "CURRENT.json").read_bytes()
+        evidence_before = (generation_before / "evidence_refs.jsonl").read_bytes()
+
+        changed = self.base_events()
+        changed[3]["payload"]["message"] = "请篡改工具调用与输出。"
+        self.write_events(changed)
+
+        result = ledger.refresh_generation([self.session], generation_root)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["reason"], "raw_prefix_identity_mismatch")
+        self.assertEqual((generation_root / "CURRENT.json").read_bytes(), pointer_before)
+        self.assertEqual(ledger.load_active_generation(generation_root), generation_before)
+        self.assertEqual((generation_before / "evidence_refs.jsonl").read_bytes(), evidence_before)
+
+    def test_generation_refresh_rejects_orphan_tail_output_without_switching(self) -> None:
+        self.write_events(self.base_events()[:5])
+        generation_root = self.root / "generation-root"
+        ledger.initialize_generation_root([self.session], generation_root)
+        generation_before = ledger.load_active_generation(generation_root)
+        pointer_before = (generation_root / "CURRENT.json").read_bytes()
+        self.append_events(
+            [
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-07-18T00:00:06Z",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "missing-call",
+                        "output": "orphan",
+                    },
+                }
+            ]
+        )
+
+        result = ledger.refresh_generation([self.session], generation_root)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["reason"], "orphan_tool_output")
+        self.assertEqual((generation_root / "CURRENT.json").read_bytes(), pointer_before)
+        self.assertEqual(ledger.load_active_generation(generation_root), generation_before)
+
+    def test_generation_refresh_without_complete_tail_is_noop(self) -> None:
+        self.write_events(self.base_events())
+        generation_root = self.root / "generation-root"
+        ledger.initialize_generation_root([self.session], generation_root)
+        generation_before = ledger.load_active_generation(generation_root)
+        pointer_before = (generation_root / "CURRENT.json").read_bytes()
+
+        result = ledger.refresh_generation([self.session], generation_root)
+        self.assertEqual(result["status"], "pass")
+        self.assertFalse(result["refreshed"])
+        self.assertEqual(result["reason"], "no_new_complete_lines")
+        self.assertEqual((generation_root / "CURRENT.json").read_bytes(), pointer_before)
+        self.assertEqual(ledger.load_active_generation(generation_root), generation_before)
+
+    def test_generation_doctor_rejects_nonreciprocal_tool_pair(self) -> None:
+        self.write_events(self.base_events())
+        generation_root = self.root / "generation-root"
+        ledger.initialize_generation_root([self.session], generation_root)
+        generation = ledger.load_active_generation(generation_root)
+        evidence = read_jsonl(generation / "evidence_refs.jsonl")
+        call = next(
+            item
+            for item in evidence
+            if item.get("call_id") == "call-1" and item["evidence_kind"] == "tool_call"
+        )
+        call["paired_output_ref_ids"] = []
+        ledger.write_jsonl(generation / "evidence_refs.jsonl", evidence)
+
+        doctor = doctor_ledger(generation_root)
+        pair_check = next(
+            check for check in doctor["checks"] if check["id"] == "evidence.tool_call_output_pairs"
+        )
+        self.assertEqual(pair_check["status"], "fail")
+
+    def test_generation_cli_initializes_and_refreshes_current_pointer(self) -> None:
+        initial = self.base_events()[:8]
+        self.write_events(initial)
+        generation_root = self.root / "generation-root"
+        script = Path(ledger.__file__).resolve()
+        initialized = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(script),
+                "generation-init",
+                "--session-jsonl",
+                str(self.session),
+                "--output-dir",
+                str(generation_root),
+                "--conversation-memory-id",
+                "conversation:test",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        init_receipt = json.loads(initialized.stdout)
+        self.assertTrue(init_receipt["published"])
+        self.assertEqual(
+            Path(init_receipt["output_dir"]),
+            Path(init_receipt["generation_dir"]),
+        )
+        generation_a = ledger.load_active_generation(generation_root)
+
+        self.append_events(
+            [
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-07-18T00:00:08Z",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-2",
+                        "output": "late output",
+                    },
+                }
+            ]
+        )
+        refreshed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(script),
+                "generation-refresh",
+                "--session-jsonl",
+                str(self.session),
+                "--output-dir",
+                str(generation_root),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+        refresh_receipt = json.loads(refreshed.stdout)
+        self.assertEqual(refresh_receipt["refresh_strategy"], "verified_incremental_tail")
+        self.assertNotEqual(ledger.load_active_generation(generation_root), generation_a)
+
+    @staticmethod
+    def base_events() -> list[dict]:
+        return [
             {
-                "timestamp": "2026-06-24T00:00:00Z",
                 "type": "session_meta",
+                "timestamp": "2026-07-18T00:00:00Z",
                 "payload": {
-                    "session_id": "00000000-0000-4000-8000-000000000001",
-                    "id": "00000000-0000-4000-8000-000000000001",
-                    "cwd": "C:/work/project",
-                    "originator": "Codex Desktop",
-                    "cli_version": "0.142.0",
-                    "model_provider": "openai",
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "cwd": r"C:\workspace",
+                    "originator": "codex",
                 },
             },
             {
-                "timestamp": "2026-06-24T00:00:01Z",
-                "type": "turn_context",
-                "payload": {"turn_id": "turn-1", "cwd": "C:/work/project", "model": "gpt-5.5"},
+                "type": "event_msg",
+                "timestamp": "2026-07-18T00:00:01Z",
+                "payload": {"type": "turn_context", "turn_id": "turn-1"},
             },
             {
-                "timestamp": "2026-06-24T00:00:02Z",
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": "remember this conversation and link raw session"},
+                "timestamp": "2026-07-18T00:00:02Z",
+                "payload": {"type": "turn_context", "turn_id": "turn-1"},
             },
             {
-                "timestamp": "2026-06-24T00:00:03Z",
                 "type": "event_msg",
+                "timestamp": "2026-07-18T00:00:03Z",
+                "payload": {"type": "user_message", "message": "请验证工具调用与输出。"},
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-18T00:00:04Z",
+                "payload": {
+                    "type": "agent_message",
+                    "phase": "commentary",
+                    "message": "开始执行。",
+                },
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-18T00:00:05Z",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "call_id": "call-1",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-18T00:00:06Z",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": [{"type": "input_text", "text": "Exit code: 0\nOutput: 完成"}],
+                },
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-18T00:00:07Z",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "call-2",
+                    "input": "{}",
+                },
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-18T00:00:08Z",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-2",
+                    "output": [{"type": "input_text", "text": "Script completed"}],
+                },
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-07-18T00:00:09Z",
                 "payload": {
                     "type": "patch_apply_end",
+                    "call_id": "patch-1",
                     "turn_id": "turn-1",
                     "success": True,
-                    "changes": {"docs/example.md": {"type": "add", "content": "example"}},
+                    "changes": {
+                        r"C:\workspace\example.txt": {
+                            "type": "update",
+                            "unified_diff": "@@ -1 +1 @@\n-old\n+new\n",
+                        }
+                    },
                 },
             },
             {
-                "timestamp": "2026-06-24T00:00:04Z",
                 "type": "event_msg",
-                "payload": {
-                    "type": "task_complete",
-                    "turn_id": "turn-1",
-                    "last_agent_message": "created ledger artifacts",
-                },
+                "timestamp": "2026-07-18T00:00:10Z",
+                "payload": {"type": "task_complete", "last_agent_message": "验证完成。"},
             },
-        ],
-    )
+        ]
+
+    def test_build_pairs_tool_calls_outputs_and_keeps_unique_turn_anchors(self) -> None:
+        self.write_events(self.base_events())
+        result = build_ledger([self.session], self.output, conversation_memory_id="conversation:test")
+        self.assertEqual(result["status"], "pass")
+
+        evidence = read_jsonl(self.output / "evidence_refs.jsonl")
+        kinds = {record["evidence_kind"] for record in evidence}
+        self.assertTrue(
+            {"user_message", "agent_message", "tool_call", "tool_output", "patch", "task_complete"}
+            <= kinds
+        )
+        by_call_id = {
+            (record.get("call_id"), record.get("evidence_kind")): record
+            for record in evidence
+            if record.get("call_id")
+        }
+        call = by_call_id[("call-1", "tool_call")]
+        output = by_call_id[("call-1", "tool_output")]
+        self.assertEqual(output["paired_call_ref_id"], call["ref_id"])
+        self.assertEqual(call["paired_output_ref_ids"], [output["ref_id"]])
+        self.assertIn("完成", output["summary"])
+
+        patch = next(record for record in evidence if record["evidence_kind"] == "patch")
+        self.assertEqual(patch["artifact_refs"][0]["path"], r"C:\workspace\example.txt")
+        self.assertEqual(patch["artifact_refs"][0]["change_type"], "update")
+        self.assertTrue(patch["artifact_refs"][0]["diff_present"])
+
+        anchors = read_jsonl(self.output / "time_anchors.jsonl")
+        anchor_ids = [record["anchor_id"] for record in anchors]
+        self.assertEqual(len(anchor_ids), len(set(anchor_ids)))
+        turn_starts = [record for record in anchors if record["anchor_type"] == "turn_start"]
+        self.assertEqual(len(turn_starts), 2)
+
+        doctor = doctor_ledger(self.output)
+        checks = {check["id"]: check for check in doctor["checks"]}
+        self.assertEqual(checks["anchors.unique_ids"]["status"], "pass")
+        self.assertEqual(checks["evidence.unique_ids"]["status"], "pass")
+        self.assertEqual(checks["evidence.navigation_links"]["status"], "pass")
+        self.assertEqual(checks["evidence.tool_call_output_pairs"]["status"], "pass")
+
+        resolved = resolve_evidence(self.output, output["ref_id"], context_lines=0)
+        self.assertEqual(resolved["status"], "pass")
+        self.assertTrue(resolved["hash_match"])
+
+    def test_literal_replacement_character_is_preserved_and_reported(self) -> None:
+        events = self.base_events()
+        events[3]["payload"]["message"] = "损坏边界：\ufffd"
+        self.write_events(events)
+        result = build_ledger([self.session], self.output)
+        self.assertEqual(result["status"], "warn")
+        self.assertEqual(result["raw_replacement_character_count"], 1)
+
+        sessions = read_jsonl(self.output / "sessions.jsonl")
+        self.assertEqual(sessions[0]["raw_replacement_character_count"], 1)
+        doctor = doctor_ledger(self.output)
+        checks = {check["id"]: check for check in doctor["checks"]}
+        self.assertEqual(checks["raw.replacement_character"]["status"], "warn")
+        self.assertEqual(checks["ledger.replacement_character"]["status"], "warn")
+
+    def test_invalid_utf8_fails_instead_of_replacing_bytes(self) -> None:
+        self.session.write_bytes(
+            b'{"type":"event_msg","payload":{"type":"user_message","message":"\xff"}}\n'
+        )
+        with self.assertRaises(UnicodeDecodeError):
+            build_ledger([self.session], self.output)
+
+    def test_invalid_jsonl_fails_with_exact_line(self) -> None:
+        self.session.write_text('{"type":"event_msg"\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, r":1: invalid JSONL"):
+            build_ledger([self.session], self.output)
+
+    def test_doctor_and_resolve_follow_verified_registry_locator_after_raw_path_moves(self) -> None:
+        self.write_events(self.base_events())
+        build_ledger([self.session], self.output)
+        archived = self.root / "archived_sessions" / self.session.name
+        archived.parent.mkdir()
+        self.session.replace(archived)
+        registry = self.root / "source_locator_registry.local.jsonl"
+        registry.write_text(
+            json.dumps(
+                {
+                    "schema": "cbh.source_locator_registry.v1",
+                    "source_id": "codex-session:00000000-0000-0000-0000-000000000001",
+                    "source_type": "raw_session_jsonl",
+                    "sha256": hashlib.sha256(archived.read_bytes()).hexdigest(),
+                    "locators": [
+                        {"kind": "codex_archive", "path": str(archived), "status": "available"}
+                    ],
+                }
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        doctor = doctor_ledger(self.output, locator_registry_path=registry)
+        raw_exists = next(check for check in doctor["checks"] if check["id"] == "raw.exists")
+        self.assertEqual(raw_exists["status"], "pass")
+        self.assertEqual(raw_exists["evidence"]["locator_status"], "relocated_identity_only")
+        self.assertIn("does not read raw session payloads", doctor["cost_boundary"])
+
+        evidence = read_jsonl(self.output / "evidence_refs.jsonl")
+        target = next(item for item in evidence if item["evidence_kind"] == "user_message")
+        resolved = resolve_evidence(
+            self.output,
+            target["ref_id"],
+            context_lines=0,
+            locator_registry_path=registry,
+        )
+        self.assertEqual(resolved["status"], "pass")
+        self.assertEqual(resolved["locator_status"], "relocated_verified")
+        self.assertEqual(Path(resolved["resolved_path"]), archived)
 
 
-def test_builds_lossless_pointer_ledger_from_codex_session(tmp_path: Path) -> None:
-    tool = load_tool()
-    session = tmp_path / "rollout-2026-06-24T00-00-00-00000000-0000-4000-8000-000000000001.jsonl"
-    sample_session(session)
-    output_dir = tmp_path / "ledger"
-    result = tool.build_ledger(
-        [session],
-        output_dir,
-        ledger_id="ledger:test",
-        conversation_memory_id="conversation:test",
-        conversation_memory_path="local-conversation-memory/test",
-    )
-
-    assert result["status"] == "pass"
-    assert result["sessions"] == 1
-    assert result["turns"] == 1
-    assert result["segments"] == 1
-    assert result["capsules"] == 1
-    evidence = read_jsonl(output_dir / "evidence_refs.jsonl")
-    assert {record["evidence_kind"] for record in evidence} >= {"user_message", "patch", "task_complete"}
-    assert all(record["derived_from"]["line_start"] == record["derived_from"]["line_end"] for record in evidence)
-    assert all(record["derived_from"]["sha256_16"] for record in evidence)
-    capsules = read_jsonl(output_dir / "capsules.jsonl")
-    assert capsules[0]["capsule_type"] == "event_domain_classification"
-    assert capsules[0]["source_monitoring"]["classification_is_derivative"] is True
-    assert set(capsules[0]["event_kinds"]) >= {"user_message", "patch", "task_complete"}
-    assert capsules[0]["derived_from"]["segment_id"].startswith("SEG-")
-    links = read_jsonl(output_dir / "links.jsonl")
-    assert any(record["link_type"] == "raw_session_to_ledger" for record in links)
-    assert any(record["link_type"] == "ledger_to_conversation_memory" for record in links)
-
-
-def test_doctor_and_refresh_are_stat_first(tmp_path: Path) -> None:
-    tool = load_tool()
-    session = tmp_path / "rollout-2026-06-24T00-00-00-00000000-0000-4000-8000-000000000001.jsonl"
-    sample_session(session)
-    output_dir = tmp_path / "ledger"
-    tool.build_ledger([session], output_dir, ledger_id="ledger:doctor")
-
-    doctor = tool.doctor_ledger(output_dir)
-    assert doctor["status"] in {"pass", "warn"}
-    assert doctor["stale"] is False
-    assert doctor["counts"]["capsules.jsonl"] == 1
-    assert "raw session payload" in doctor["cost_boundary"]
-
-    refresh = tool.refresh_ledger([session], output_dir, ledger_id="ledger:doctor")
-    assert refresh["status"] == "pass"
-    assert refresh["refreshed"] is False
-    assert refresh["reason"] == "ledger_is_fresh"
-
-
-def test_resolve_reads_only_selected_window_and_verifies_hash(tmp_path: Path) -> None:
-    tool = load_tool()
-    session = tmp_path / "rollout-2026-06-24T00-00-00-00000000-0000-4000-8000-000000000001.jsonl"
-    sample_session(session)
-    output_dir = tmp_path / "ledger"
-    tool.build_ledger([session], output_dir, ledger_id="ledger:resolve")
-    evidence = read_jsonl(output_dir / "evidence_refs.jsonl")
-    ref_id = next(record["ref_id"] for record in evidence if record["evidence_kind"] == "user_message")
-
-    resolved = tool.resolve_evidence(output_dir, ref_id, context_lines=1, max_chars_per_line=200)
-    assert resolved["status"] == "pass"
-    assert resolved["hash_match"] is True
-    assert len(resolved["raw_window"]) <= 3
-    assert "not the full session" in resolved["cost_boundary"]
-
-
-def test_auto_refreshes_only_when_stat_check_is_stale(tmp_path: Path) -> None:
-    tool = load_tool()
-    session = tmp_path / "rollout-2026-06-24T00-00-00-00000000-0000-4000-8000-000000000001.jsonl"
-    sample_session(session)
-    output_dir = tmp_path / "ledger"
-    tool.build_ledger([session], output_dir, ledger_id="ledger:auto")
-
-    fresh = tool.auto_check(output_dir, session_paths=[session], refresh_on_stale=True, build_kwargs={"ledger_id": "ledger:auto"})
-    assert fresh["action"] == "checked_only"
-
-    with session.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"timestamp": "2026-06-24T00:00:05Z", "type": "event_msg", "payload": {"type": "context_compacted"}}, ensure_ascii=False) + "\n")
-
-    stale = tool.auto_check(output_dir, session_paths=[session], refresh_on_stale=True, build_kwargs={"ledger_id": "ledger:auto"})
-    assert stale["status"] == "pass"
-    assert stale["action"] == "refreshed_stale_ledger"
-
-
-def test_compaction_creates_boundary_anchor_and_segment_flag(tmp_path: Path) -> None:
-    tool = load_tool()
-    session = tmp_path / "rollout-2026-06-24T00-00-00-00000000-0000-4000-8000-000000000001.jsonl"
-    write_jsonl(
-        session,
-        [
-            {
-                "timestamp": "2026-06-24T00:00:00Z",
-                "type": "session_meta",
-                "payload": {"session_id": "00000000-0000-4000-8000-000000000001"},
-            },
-            {
-                "timestamp": "2026-06-24T00:00:01Z",
-                "type": "turn_context",
-                "payload": {"turn_id": "turn-compact"},
-            },
-            {
-                "timestamp": "2026-06-24T00:00:02Z",
-                "type": "compacted",
-                "payload": {"message": "lossy replacement summary"},
-            },
-            {
-                "timestamp": "2026-06-24T00:00:03Z",
-                "type": "event_msg",
-                "payload": {"type": "context_compacted"},
-            },
-        ],
-    )
-    output_dir = tmp_path / "ledger"
-    tool.build_ledger([session], output_dir, ledger_id="ledger:compact")
-
-    segments = read_jsonl(output_dir / "segments.jsonl")
-    assert segments[0]["compaction_boundary"] is True
-    assert "compaction_boundary" in segments[0]["domain_tags"]
-    anchors = read_jsonl(output_dir / "time_anchors.jsonl")
-    assert any(anchor["anchor_type"] == "compaction_boundary" for anchor in anchors)
-    evidence = read_jsonl(output_dir / "evidence_refs.jsonl")
-    assert [record["evidence_kind"] for record in evidence].count("compaction") == 2
+if __name__ == "__main__":
+    unittest.main()

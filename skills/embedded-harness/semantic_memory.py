@@ -1,7 +1,8 @@
 """Pure-file semantic memory records with meta-first retrieval.
 
 The canonical payload is append-only JSONL.  A separate compact JSONL meta
-surface is navigation-only and points to one exact payload line.  Legacy
+surface is navigation-only and points to one exact payload byte range (or a
+legacy line locator). Discovery and explicit expansion can run separately. Legacy
 records remain immutable and are exposed through hash-bound link records.
 
 This module does not choose a memory lane, grant write authority, promote task
@@ -16,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -106,6 +108,187 @@ def _with_hash(value: Mapping[str, Any], field: str) -> dict[str, Any]:
 
 def _normalized_strings(values: Iterable[Any]) -> list[str]:
     return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+
+
+_RAW_EVIDENCE_READ_DEPTHS = {
+    "artifact_output_window",
+    "full_lane_audit",
+    "raw_context_window",
+    "source_cascade_review",
+}
+
+
+def _cascade_record_ids(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(record.get("record_id") or "").strip()
+            for record in records
+            if isinstance(record, Mapping)
+            and str(record.get("record_id") or "").strip()
+        )
+    )
+
+
+def _cascade_source_refs(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        ref = {
+            key: _copy(record[key])
+            for key in ("record_id", "source_id", "path", "line", "sha256")
+            if record.get(key) not in (None, "")
+        }
+        if not ref:
+            continue
+        key = _canonical_json(ref)
+        if key not in seen:
+            refs.append(ref)
+            seen.add(key)
+    return refs
+
+
+def _cascade_evidence_handles(
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    handles: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        for field in ("evidence_handles", "derived_from"):
+            value = record.get(field)
+            values = [value] if isinstance(value, Mapping) else value
+            if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+                continue
+            for item in values:
+                if not isinstance(item, Mapping):
+                    continue
+                handle = {
+                    str(key): _copy(entry)
+                    for key, entry in item.items()
+                    if entry not in (None, "")
+                }
+                if not handle or not any(
+                    key in handle
+                    for key in (
+                        "source_id",
+                        "path",
+                        "original_path",
+                        "line",
+                        "sha256",
+                        "line_sha256_16",
+                    )
+                ):
+                    continue
+                key = _canonical_json(handle)
+                if key not in seen:
+                    handles.append(handle)
+                    seen.add(key)
+    return handles
+
+
+def plan_memory_source_cascade(
+    *,
+    read_depth_profile: str,
+    selected_records: Sequence[Mapping[str, Any]],
+    semantic_review_candidates: Sequence[Mapping[str, Any]],
+    retrieval_requested: bool,
+    conversation_navigation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Plan the next source-preserving read without opening another source."""
+
+    profile = str(read_depth_profile or "none")
+    selected = [
+        record for record in selected_records if isinstance(record, Mapping)
+    ]
+    candidates = [
+        record
+        for record in semantic_review_candidates
+        if isinstance(record, Mapping)
+    ]
+    navigation_bundles = (
+        list(conversation_navigation.get("bundles") or [])
+        if isinstance(conversation_navigation, Mapping)
+        else []
+    )
+    selected_ids = _cascade_record_ids(selected)
+    candidate_ids = _cascade_record_ids(candidates)
+    source_refs = _cascade_source_refs(selected)
+    evidence_handles = _cascade_evidence_handles(selected)
+    raw_required = profile in _RAW_EVIDENCE_READ_DEPTHS
+
+    if not retrieval_requested and not navigation_bundles:
+        status = "not_requested"
+        current_layer = "none"
+        required_layer = "none"
+        next_action = "none"
+        reasons = ["memory_retrieval_not_requested"]
+        stop_condition = "no_memory_work"
+    elif candidates and not selected:
+        status = "semantic_review_required"
+        current_layer = "recall_node"
+        required_layer = "semantic_source"
+        next_action = "select_and_materialize_semantic_source"
+        reasons = ["candidate_payload_not_opened"]
+        stop_condition = (
+            "stop_after_one_selected_semantic_source_is_materialized_or_mark_unresolved"
+        )
+    elif selected:
+        current_layer = "semantic_source"
+        if raw_required:
+            status = "drill_down_required"
+            required_layer = "raw_evidence"
+            if evidence_handles:
+                next_action = "open_bounded_raw_evidence"
+                reasons = ["read_depth_requires_raw_evidence", "evidence_handle_available"]
+            else:
+                next_action = "resolve_bounded_evidence_handle"
+                reasons = ["read_depth_requires_raw_evidence", "evidence_handle_missing"]
+            stop_condition = (
+                "stop_after_required_bounded_evidence_is_opened_and_support_is_sufficient"
+            )
+        else:
+            status = "semantic_source_ready"
+            required_layer = "semantic_source"
+            next_action = "stop_at_semantic_source"
+            reasons = ["selected_semantic_source_is_sufficient_for_requested_depth"]
+            stop_condition = (
+                "stop_unless_ambiguity_or_strong_claim_requires_deeper_evidence"
+            )
+    elif navigation_bundles:
+        status = "semantic_source_required"
+        current_layer = "lane_resolver"
+        required_layer = "semantic_source"
+        next_action = "open_linked_semantic_source"
+        reasons = ["conversation_lane_resolved_without_selected_semantic_record"]
+        stop_condition = "stop_after_one_relevant_semantic_source_is_materialized"
+    else:
+        status = "no_match"
+        current_layer = "lane_resolver"
+        required_layer = "semantic_source"
+        next_action = "no_match"
+        reasons = ["no_recall_node_or_semantic_source_selected"]
+        stop_condition = "stop_and_report_unresolved_memory_lookup"
+
+    return {
+        "schema": "cbh.memory_source_cascade.v1",
+        "status": status,
+        "read_depth_profile": profile,
+        "current_layer": current_layer,
+        "required_layer": required_layer,
+        "next_action": next_action,
+        "reason_codes": reasons,
+        "selected_record_ids": selected_ids,
+        "candidate_record_ids": candidate_ids,
+        "semantic_source_refs": source_refs,
+        "evidence_handles": evidence_handles,
+        "raw_evidence_opened": False,
+        "automatic_open": False,
+        "authority_granted": False,
+        "stop_condition": stop_condition,
+    }
 
 
 def _validate_query_type(query_type: str) -> None:
@@ -319,7 +502,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _meta_from_record(record: Mapping[str, Any], *, line: int, record_bytes: int) -> dict[str, Any]:
+def _meta_from_record(record: Mapping[str, Any], *, line: int, record_bytes: int, byte_offset: int | None = None) -> dict[str, Any]:
     meta = record["meta"]
     base = {
         "schema": META_SCHEMA,
@@ -346,6 +529,8 @@ def _meta_from_record(record: Mapping[str, Any], *, line: int, record_bytes: int
         "belief_status": record["provenance"]["belief_status"],
         "evidence_boundary": "navigation_only_open_selected_record_for_facts",
     }
+    if byte_offset is not None:
+        base["payload"]["byte_offset"] = byte_offset
     return _with_hash(base, "meta_sha256")
 
 
@@ -376,10 +561,11 @@ def append_memory_record(root: Path, record: Mapping[str, Any]) -> dict[str, Any
         raise ValueError("memory_record_id_conflict")
     record_line = _line_count(records_path) + 1
     record_bytes_value = len(_canonical_bytes(record_value) + b"\n")
+    record_byte_offset = records_path.stat().st_size if records_path.exists() else 0
     appended_line, _written = _append_line(records_path, record_value)
     if appended_line != record_line:
         raise ValueError("memory_record_append_line_mismatch")
-    meta = _meta_from_record(record_value, line=record_line, record_bytes=record_bytes_value)
+    meta = _meta_from_record(record_value, line=record_line, record_bytes=record_bytes_value, byte_offset=record_byte_offset)
     meta_line, _meta_written = _append_line(meta_path, meta)
     return {
         "schema": APPEND_RECEIPT_SCHEMA,
@@ -406,6 +592,7 @@ def rebuild_memory_meta(root: Path) -> dict[str, Any]:
         raise ValueError("invalid_store_schema")
     raw_lines = records_path.read_bytes().splitlines(keepends=True)
     metas: list[dict[str, Any]] = []
+    byte_offset = 0
     for line_number, raw in enumerate(raw_lines, start=1):
         if not raw.endswith(b"\n") or raw.endswith(b"\r\n"):
             raise ValueError("memory_jsonl_lf_required")
@@ -415,7 +602,8 @@ def rebuild_memory_meta(root: Path) -> dict[str, Any]:
         validate_memory_record(record)
         if raw != _canonical_bytes(record) + b"\n":
             raise ValueError("memory_record_not_canonical")
-        metas.append(_meta_from_record(record, line=line_number, record_bytes=len(raw)))
+        metas.append(_meta_from_record(record, line=line_number, record_bytes=len(raw), byte_offset=byte_offset))
+        byte_offset += len(raw)
     temporary = meta_path.with_suffix(meta_path.suffix + ".tmp")
     payload = b"".join(_canonical_bytes(meta) + b"\n" for meta in metas)
     with temporary.open("wb") as handle:
@@ -450,10 +638,22 @@ def materialize_memory_record(root: Path, meta: Mapping[str, Any]) -> dict[str, 
     records_path = Path(root) / relative
     selected: bytes | None = None
     with records_path.open("rb") as handle:
-        for current, raw in enumerate(handle, start=1):
-            if current == line_number:
-                selected = raw
-                break
+        if "byte_offset" in payload:
+            offset, size = payload["byte_offset"], payload.get("record_bytes")
+            if (not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
+                    or not isinstance(size, int) or isinstance(size, bool) or size <= 0
+                    or line_number <= 0):
+                raise ValueError("invalid_memory_byte_range")
+            handle.seek(offset)
+            selected = handle.read(size)
+            if len(selected) != size:
+                raise ValueError("memory_payload_byte_range_incomplete")
+        else:
+            # Original v3 metadata remains readable until an explicit rebuild.
+            for current, raw in enumerate(handle, start=1):
+                if current == line_number:
+                    selected = raw
+                    break
     if selected is None or not selected.endswith(b"\n") or selected.endswith(b"\r\n"):
         raise ValueError("memory_payload_line_not_found")
     record = json.loads(selected[:-1].decode("utf-8", errors="strict"))
@@ -505,6 +705,12 @@ def _score_meta(meta: Mapping[str, Any], query: str) -> tuple[int, list[str]]:
 def _eligible(meta: Mapping[str, Any], query_type: str) -> bool:
     if query_type not in set(meta.get("query_types") or []):
         return False
+    # Incident records describe observations, not the current operating policy.
+    # Keep immutable payloads available through history/contradiction queries.
+    if query_type == "current_state" and meta.get("memory_class") in {
+        "error", "common_error", "interaction_error", "major_incident"
+    }:
+        return False
     state = str(meta.get("state") or "")
     if query_type == "current_state" and state in CURRENT_EXCLUDED_STATES:
         return False
@@ -517,6 +723,7 @@ def search_memory_store(
     *,
     query_type: str,
     limit: int = 5,
+    metadata_only: bool = False,
 ) -> dict[str, Any]:
     _validate_query_type(query_type)
     store_root = Path(root)
@@ -537,13 +744,18 @@ def search_memory_store(
     candidate_views: list[dict[str, Any]] = []
     payload_bytes = 0
     for score, _ordinal, meta, reasons in candidates[: max(1, limit)]:
-        if score < 8:
+        if metadata_only or score < 8:
             candidate_views.append(
                 {
                     "record_id": meta["record_id"],
                     "candidate_label": meta["candidate_label"],
                     "summary": meta["summary"],
                     "state": meta["state"],
+                    "current_status": meta["current_status"],
+                    "memory_class": meta["memory_class"],
+                    "owner": _copy(meta["owner"]),
+                    "facets": _copy(meta.get("facets") or {}),
+                    "edges": _copy(meta.get("edges") or []),
                     "score": score,
                     "selection_reasons": reasons,
                     "evidence_boundary": "navigation_candidate_only_not_fact_match",
@@ -575,6 +787,15 @@ def search_memory_store(
         "raw_evidence_opened": False,
         "authority_granted": False,
     }
+
+
+def read_memory_record(root: Path, record_id: str) -> dict[str, Any]:
+    """Expand one explicitly selected record, verifying its exact source bytes."""
+    _store_path, _records_path, meta_path = _store_paths(Path(root))
+    for meta in _load_jsonl(meta_path):
+        if meta.get("record_id") == record_id:
+            return materialize_memory_record(root, meta)
+    raise ValueError("memory_record_not_found")
 
 
 def _extract_heading(text: str, heading: str, level: int) -> str:
@@ -706,9 +927,7 @@ def _search_legacy_links(
     for ordinal, link in enumerate(links):
         if link.get("schema") != LEGACY_LINK_SCHEMA:
             raise ValueError("invalid_legacy_link_schema")
-        if query_type not in set(link.get("query_types") or []):
-            continue
-        if query_type == "current_state" and link.get("state") in CURRENT_EXCLUDED_STATES:
+        if not _eligible(link, query_type):
             continue
         meta = {
             "record_id": link["record_id"],
@@ -878,12 +1097,13 @@ def _load_record_argument(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("append", "search", "check", "rebuild-meta"))
+    parser.add_argument("operation", choices=("append", "search", "discover", "read", "check", "rebuild-meta"))
     parser.add_argument("--store-root", required=True)
     record_group = parser.add_mutually_exclusive_group()
     record_group.add_argument("--record-file")
     record_group.add_argument("--record-json")
     parser.add_argument("--query")
+    parser.add_argument("--record-id")
     parser.add_argument("--query-type", choices=sorted(QUERY_TYPES), default="history_reason")
     parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
@@ -891,7 +1111,7 @@ def main() -> int:
         if not (args.record_file or args.record_json):
             parser.error("append requires --record-file or --record-json")
         result = append_memory_record(Path(args.store_root), _load_record_argument(args))
-    elif args.operation == "search":
+    elif args.operation in {"search", "discover"}:
         if args.query is None:
             parser.error("search requires --query")
         result = search_memory_store(
@@ -899,13 +1119,20 @@ def main() -> int:
             args.query,
             query_type=args.query_type,
             limit=args.limit,
+            metadata_only=args.operation == "discover",
         )
+    elif args.operation == "read":
+        if not args.record_id:
+            parser.error("read requires --record-id")
+        result = read_memory_record(Path(args.store_root), args.record_id)
     elif args.operation == "check":
         result = check_memory_store(Path(args.store_root))
     else:
         result = rebuild_memory_meta(Path(args.store_root))
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     print(_canonical_json(result))
-    return 0 if result.get("status") not in {"fail"} else 1
+    return 1 if result.get("status") == "fail" else 0
 
 
 __all__ = [
@@ -920,7 +1147,9 @@ __all__ = [
     "check_memory_store",
     "materialize_legacy_link",
     "materialize_memory_record",
+    "plan_memory_source_cascade",
     "rebuild_memory_meta",
+    "read_memory_record",
     "search_memory_store",
     "unified_memory_search",
     "validate_memory_record",

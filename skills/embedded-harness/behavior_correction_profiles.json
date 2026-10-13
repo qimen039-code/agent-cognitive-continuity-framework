@@ -10,7 +10,10 @@
       "decision_mode": "auto_rewrite",
       "promotion_status": "accepted",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "候选命令保留同一循环主体、下游管道和工作目录，并由实际 PowerShell Parser 验证为零语法错误。",
       "behavior_class": "shell_syntax_translation",
       "environment": "powershell",
@@ -35,12 +38,13 @@
       "resolution_code": "nonblocking_updated_input_subject_binding_preserved_and_parser_zero_errors",
       "evidence_boundary": "仅证明机械语法形状、主体绑定与执行工作目录不变，且实际 PowerShell Parser 对候选返回零错误；不证明命令运行结果或业务结果正确。",
       "escalation_boundary": "ambiguous_or_unverifiable_input_is_left_unchanged_without_blocking",
-      "source_kind": "bundled_regression_fixture",
-      "source_ref": "tests/test_nonblocking_runtime_contract.py#powershell-statement-loop-pipeline",
+      "source_kind": "accepted_generalization_candidate",
+      "source_ref": "tests/test_behavior_correction_gate.py",
+      "source_record_id": "CE-POWERSHELL-FOREACH-PIPELINE-2026-07-10",
       "runtime_migration": {
         "schema": "cbh.behavior_correction_migration.v1",
         "status": "accepted",
-        "promotion_basis": "public_regression_fixture_plus_powershell_parser_zero_errors",
+        "promotion_basis": "repeated_local_recurrence_plus_explicit_user_approval_2026-07-18",
         "hook_event": "PreToolUse",
         "tool_name": "Bash",
         "correction_mode": "allow_updated_input_nonblocking",
@@ -72,7 +76,10 @@
       "decision_mode": "preflight_validate",
       "promotion_status": "validation_only",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "同一 PowerShell Parser 对经主体绑定的修正候选返回零语法错误。",
       "behavior_class": "shell_syntax_translation",
       "environment": "powershell",
@@ -98,8 +105,9 @@
       "resolution_code": "subject_binding_preserved_and_powershell_parser_zero_errors",
       "evidence_boundary": "仅证明按平衡括号/花括号提取的完整循环主体、输入表达式、下游管道与执行工作目录绑定一致，且同一 PowerShell Parser 返回零语法错误；不证明命令运行结果正确。",
       "escalation_boundary": "cross_strategy_repetition_or_high_risk_effect_only",
-      "source_kind": "bundled_regression_fixture",
-      "source_ref": "tests/test_nonblocking_runtime_contract.py#powershell-statement-loop-pipeline"
+      "source_kind": "common_error_record",
+      "source_ref": "tests/test_behavior_correction_gate.py",
+      "source_record_id": "CE-POWERSHELL-FOREACH-PIPELINE-2026-07-10"
     },
     {
       "profile_id": "powershell_interpolated_variable_colon",
@@ -110,7 +118,10 @@
       "decision_mode": "preflight_validate",
       "promotion_status": "validation_only",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "变量身份与可展开字符串内容保持一致，且同一 PowerShell Parser 返回零语法错误。",
       "behavior_class": "shell_syntax_translation",
       "environment": "powershell",
@@ -139,7 +150,7 @@
       "evidence_boundary": "仅证明规范化字符串主体和变量身份保持一致，且同一 PowerShell Parser 返回零语法错误；不证明变量值、命令运行结果或输出语义正确。",
       "escalation_boundary": "same_subject_recurrence_or_high_risk_effect_only",
       "source_kind": "official_runtime_parser_contract",
-      "source_ref": "https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.language.parser.parseinput?view=powershellsdk-7.6.0"
+      "source_ref": "tests/test_behavior_correction_gate.py"
     },
     {
       "profile_id": "powershell_bash_heredoc_translation",
@@ -150,7 +161,10 @@
       "decision_mode": "preflight_validate",
       "promotion_status": "validation_only",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "脚本正文、参数与工作目录绑定不变，且 PowerShell 传输语法可解析。",
       "behavior_class": "shell_dialect_translation",
       "environment": "powershell",
@@ -175,8 +189,8 @@
       "resolution_code": "inline_script_subject_preserved_and_powershell_transport_parsed",
       "evidence_boundary": "仅证明规范化 Python 解释器参数、内联脚本正文、前后命令上下文与执行工作目录绑定一致，且 PowerShell 传输语法可解析；不证明脚本运行结果正确。",
       "escalation_boundary": "cross_strategy_repetition_or_high_risk_effect_only",
-      "source_kind": "public_reference_profile",
-      "source_ref": "behavior_correction_source_map.md#bash-heredoc-expansion-preserving-transport-reference-only"
+      "source_kind": "local_policy_anchor",
+      "source_ref": "tests/test_behavior_correction_gate.py"
     },
     {
       "profile_id": "powershell_unquoted_bash_heredoc_translation",
@@ -187,7 +201,10 @@
       "decision_mode": "predictive_review",
       "promotion_status": "semantic_review_only",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "完整 Bash 脚本逐字保真，并分别取得 PowerShell 传输解析证据与 Bash 语法证据。",
       "behavior_class": "shell_dialect_translation",
       "environment": "powershell",
@@ -216,8 +233,8 @@
       "resolution_code": "expanding_bash_script_subject_preserved_and_bash_syntax_verified",
       "evidence_boundary": "仅证明完整 Bash 脚本主体、前后命令上下文与执行工作目录绑定一致，由 PowerShell literal here-string 原样传输，外层 PowerShell 可解析，且同一绑定脚本的 bash -n 或成功 bash -s 运行提供了 Bash 解析证据；不证明展开结果、外部依赖或业务语义正确。",
       "escalation_boundary": "cross_strategy_repetition_or_high_risk_effect_only",
-      "source_kind": "public_reference_profile",
-      "source_ref": "behavior_correction_source_map.md#bash-heredoc-expansion-preserving-transport-reference-only"
+      "source_kind": "local_policy_anchor",
+      "source_ref": "tests/test_behavior_correction_gate.py"
     },
     {
       "profile_id": "unicode_replacement_character_python_inline_write",
@@ -228,7 +245,10 @@
       "decision_mode": "predictive_review",
       "promotion_status": "semantic_review_only",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "同一字面写入目标可严格 UTF-8 回读，且实际常量载荷与目标内容均不含非预期 U+FFFD。",
       "behavior_class": "text_encoding_integrity",
       "environment": "any",
@@ -261,8 +281,8 @@
       "resolution_code": "exact_python_write_target_utf8_decodable_without_u_fffd",
       "evidence_boundary": "仅证明 Python -c 的同一字面写入目标与实际常量载荷绑定一致，且精确目标可严格按 UTF-8 解码并未发现 U+FFFD；不证明文本语义或来源正确。",
       "escalation_boundary": "same_target_recurrence_or_dynamic_target_contamination_only",
-      "source_kind": "public_reference_profile",
-      "source_ref": "behavior_correction_source_map.md#unicode-replacement-character-containment"
+      "source_kind": "local_policy_anchor",
+      "source_ref": "tests/test_behavior_correction_gate.py"
     },
     {
       "profile_id": "unicode_replacement_character_text_mutation",
@@ -273,7 +293,10 @@
       "decision_mode": "predictive_review",
       "promotion_status": "semantic_review_only",
       "source_record_ids": [],
-      "historical_replay_refs": [],
+      "historical_replay_refs": [
+        "tests/test_behavior_correction_gate.py",
+        "tests/test_behavior_correction_hook.py"
+      ],
       "postcondition": "精确目标可按声明编码严格回读，文本不含非预期 U+FFFD，且写入范围外无变化。",
       "behavior_class": "text_encoding_integrity",
       "environment": "any",
@@ -306,8 +329,8 @@
       "resolution_code": "exact_target_utf8_decodable_without_u_fffd",
       "evidence_boundary": "仅证明精确目标可严格按 UTF-8 解码且未发现 U+FFFD；不证明文本语义正确、来自权威源或不存在其他合法 Unicode 形式的 mojibake。",
       "escalation_boundary": "same_target_recurrence_or_cross_file_contamination_only",
-      "source_kind": "public_reference_profile",
-      "source_ref": "behavior_correction_source_map.md#unicode-replacement-character-containment"
+      "source_kind": "local_policy_anchor",
+      "source_ref": "tests/test_behavior_correction_gate.py"
     }
   ]
 }

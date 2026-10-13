@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import io
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
 HARNESS = ROOT / "skills" / "embedded-harness"
 if not HARNESS.is_dir():
     HARNESS = ROOT
@@ -98,6 +100,75 @@ def test_meta_first_search_opens_no_payload_for_no_match_and_one_payload_for_hit
     assert hit["metrics"]["meta_bytes_read"] > 0
     assert hit["metrics"]["payload_bytes_read"] > 0
     assert len(hit["selected_records"]) == 1
+
+
+def test_discovery_returns_semantic_metadata_without_reading_payload(tmp_path: Path, monkeypatch) -> None:
+    store = tmp_path / "memory-v3"
+    append_memory_record(store, record())
+    original_open = Path.open
+    def guard(path, *args, **kwargs):
+        if path == store / "records.jsonl":
+            raise AssertionError("discovery opened full memory payload")
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", guard)
+    result = search_memory_store(store, "U+FEFF 导致 JSON.parse 失败", query_type="current_state", metadata_only=True)
+    assert result["selected_records"] == []
+    assert result["metrics"]["payload_bytes_read"] == 0
+    candidate = result["candidate_views"][0]
+    assert candidate["record_id"] == "MEM-TEST-NEW-001"
+    assert candidate["facets"]["surface"] == ["json", "powershell"]
+    assert candidate["edges"] == [{"type": "solves", "target_id": "ERR-TEST-BOM-001"}]
+    assert result["coverage_status"] == "semantic_review_required"
+
+
+def test_selected_record_uses_exact_byte_range_without_scanning_prefix(tmp_path: Path, monkeypatch) -> None:
+    store = tmp_path / "memory-v3"
+    append_memory_record(store, record("MEM-FIRST"))
+    expected = record("MEM-SECOND")
+    append_memory_record(store, expected)
+    payload = (store / "records.jsonl").read_bytes()
+    meta = json.loads((store / "meta.jsonl").read_text(encoding="utf-8").splitlines()[1])
+    first_bytes = len(payload.splitlines(keepends=True)[0])
+    assert meta["payload"]["byte_offset"] == first_bytes
+    class RangeRead(io.BytesIO):
+        def __iter__(self):
+            raise AssertionError("indexed reading scanned preceding records")
+        def read(self, size=-1):
+            assert self.tell() == first_bytes
+            assert size == meta["payload"]["record_bytes"]
+            return super().read(size)
+    original_open = Path.open
+    def instrument(path, *args, **kwargs):
+        if path == store / "records.jsonl":
+            return RangeRead(payload)
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", instrument)
+    assert materialize_memory_record(store, meta) == expected
+
+
+def test_meta_rebuild_adds_offsets_without_changing_canonical_bytes(tmp_path: Path) -> None:
+    store = tmp_path / "memory-v3"
+    append_memory_record(store, record("MEM-FIRST"))
+    append_memory_record(store, record("MEM-SECOND"))
+    before = (store / "records.jsonl").read_bytes()
+    rebuilt = rebuild_memory_meta(store)
+    metas = [json.loads(line) for line in (store / "meta.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [item["payload"]["byte_offset"] for item in metas] == [0, len(before.splitlines(keepends=True)[0])]
+    assert (store / "records.jsonl").read_bytes() == before
+    assert rebuilt["canonical_records_changed"] is False
+
+
+def test_discover_then_read_cli_expands_exact_selected_record(tmp_path: Path) -> None:
+    store = tmp_path / "memory-v3"
+    expected = record()
+    append_memory_record(store, expected)
+    base = [sys.executable, "-B", str(HARNESS / "semantic_memory.py")]
+    discovery = subprocess.run(base + ["discover", "--store-root", str(store), "--query", "U+FEFF"], capture_output=True)
+    assert discovery.returncode == 0
+    candidates = json.loads(discovery.stdout.decode("utf-8"))["candidate_views"]
+    expanded = subprocess.run(base + ["read", "--store-root", str(store), "--record-id", candidates[0]["record_id"]], capture_output=True)
+    assert expanded.returncode == 0, expanded.stderr.decode("utf-8")
+    assert json.loads(expanded.stdout.decode("utf-8")) == expected
 
 
 def test_legacy_link_is_navigation_only_and_materializes_one_exact_heading(

@@ -57,11 +57,17 @@ TRACKED_PATHS: list[tuple[str, ...]] = [
     ("router_decision_contract", "correction_lifecycle_contract"),
     ("router_decision_contract", "explicit_record_triggers"),
     ("router_decision_contract", "conversation_lane_declaration_triggers"),
+    ("router_decision_contract", "referenced_conversation_memory_contract"),
+    ("router_decision_contract", "vague_memory_recall_contract"),
     ("router_decision_contract", "causal_attribution_contract"),
     ("router_decision_contract", "causal_attribution_triggers"),
     ("router_decision_contract", "issue_prevention_gates"),
-    ("router_decision_contract", "direct_outcome_first_contract"),
     ("router_decision_contract", "conversation_memory_full_lane_triggers"),
+    ("router_decision_contract", "tool_discovery_status_values"),
+    ("router_decision_contract", "skill_or_tool_need_values"),
+    ("router_decision_contract", "preferred_call_surface_values"),
+    ("router_decision_contract", "tool_surface_discovery_rule"),
+    ("router_decision_contract", "capability_discovery_contract"),
     ("search_and_learning_decision_matrix",),
     ("runtime_enforcement", "behavior_correction_contract"),
 ]
@@ -262,6 +268,125 @@ def _normal_harness_governance_recall_triggers(authoring: dict[str, Any]) -> lis
     return _string_list(triggers, "router_decision_contract.harness_governance_recall_triggers")
 
 
+def _normal_router_string_list(
+    authoring: dict[str, Any], field: str
+) -> list[str] | None:
+    router = authoring.get("router_decision_contract", {})
+    if not isinstance(router, dict):
+        raise ValueError("router_decision_contract must be a table")
+    value = router.get(field)
+    if value is None:
+        return None
+    return _string_list(value, f"router_decision_contract.{field}")
+
+
+def _normal_tool_surface_discovery_rule(authoring: dict[str, Any]) -> str | None:
+    router = authoring.get("router_decision_contract", {})
+    if not isinstance(router, dict):
+        raise ValueError("router_decision_contract must be a table")
+    value = router.get("tool_surface_discovery_rule")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "router_decision_contract.tool_surface_discovery_rule must be a non-empty string"
+        )
+    return value
+
+
+def _normal_capability_discovery_contract(
+    authoring: dict[str, Any],
+) -> dict[str, Any] | None:
+    router = authoring.get("router_decision_contract", {})
+    if not isinstance(router, dict):
+        raise ValueError("router_decision_contract must be a table")
+    contract = router.get("capability_discovery_contract")
+    if contract is None:
+        return None
+    if not isinstance(contract, dict):
+        raise ValueError("capability_discovery_contract must be a table")
+    allowed = {
+        "enabled",
+        "schema",
+        "router_skill",
+        "meta_index_path",
+        "registry_script",
+        "refresh_ttl_hours",
+        "source_fingerprint_invalidation",
+        "miss_refresh_limit_per_query",
+        "runtime_candidate_limit",
+        "background_schedule",
+        "current_task_truth_required",
+        "rule",
+        "generic_triggers",
+    }
+    unknown = sorted(set(contract) - allowed)
+    if unknown:
+        raise ValueError(
+            f"capability_discovery_contract has unknown fields: {', '.join(unknown)}"
+        )
+    triggers = contract.get("generic_triggers")
+    if not isinstance(triggers, dict):
+        raise ValueError("capability_discovery_contract.generic_triggers must be a table")
+    trigger_names = {"explicit_surface", "action", "object", "state"}
+    unknown_triggers = sorted(set(triggers) - trigger_names)
+    if unknown_triggers:
+        raise ValueError(
+            "capability_discovery_contract.generic_triggers has unknown fields: "
+            + ", ".join(unknown_triggers)
+        )
+    normalized_triggers = {
+        name: _string_list(
+            triggers.get(name),
+            f"capability_discovery_contract.generic_triggers.{name}",
+        )
+        for name in sorted(trigger_names)
+    }
+    ttl = contract.get("refresh_ttl_hours")
+    miss_limit = contract.get("miss_refresh_limit_per_query")
+    candidate_limit = contract.get("runtime_candidate_limit")
+    if not isinstance(ttl, int) or not 1 <= ttl <= 168:
+        raise ValueError("capability_discovery_contract.refresh_ttl_hours must be 1..168")
+    if miss_limit != 1:
+        raise ValueError(
+            "capability_discovery_contract.miss_refresh_limit_per_query must equal 1"
+        )
+    if not isinstance(candidate_limit, int) or not 1 <= candidate_limit <= 16:
+        raise ValueError(
+            "capability_discovery_contract.runtime_candidate_limit must be 1..16"
+        )
+    required_strings = (
+        "schema",
+        "router_skill",
+        "meta_index_path",
+        "registry_script",
+        "rule",
+    )
+    for field in required_strings:
+        value = contract.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"capability_discovery_contract.{field} must be non-empty")
+    return {
+        "enabled": bool(contract.get("enabled")),
+        "schema": contract["schema"],
+        "router_skill": contract["router_skill"],
+        "meta_index_path": contract["meta_index_path"],
+        "registry_script": contract["registry_script"],
+        "refresh_ttl_hours": ttl,
+        "source_fingerprint_invalidation": bool(
+            contract.get("source_fingerprint_invalidation")
+        ),
+        "miss_refresh_limit_per_query": miss_limit,
+        "runtime_candidate_limit": candidate_limit,
+        "background_schedule": bool(contract.get("background_schedule")),
+        "current_task_truth_required": bool(
+            contract.get("current_task_truth_required")
+        ),
+        "rule": contract["rule"],
+        "generic_triggers": normalized_triggers,
+    }
+
+
 def _normal_action_binding_contract(authoring: dict[str, Any]) -> dict[str, Any] | None:
     router = authoring.get("router_decision_contract", {})
     if not isinstance(router, dict):
@@ -323,75 +448,44 @@ def _normal_task_continuity_contract(
         return None
     if not isinstance(contract, dict):
         raise ValueError("task_continuity_contract must be a table")
-    if contract.get("enabled") is not True:
-        raise ValueError("task_continuity_contract.enabled must be true")
-    if contract.get("schema") != "cbh.task_continuity_contract.v1":
-        raise ValueError("task_continuity_contract.schema is unsupported")
-    lifecycle = _string_list(
-        contract.get("lifecycle_values"),
-        "task_continuity_contract.lifecycle_values",
-    )
-    if lifecycle != ["DORMANT", "ARMED", "ACTIVE", "VERIFYING", "RETIRED"]:
-        raise ValueError("task_continuity_contract.lifecycle_values mismatch")
-    decisions = _string_list(
-        contract.get("decision_values"),
-        "task_continuity_contract.decision_values",
-    )
-    if decisions != ["dormant", "arm", "continue"]:
-        raise ValueError("task_continuity_contract.decision_values mismatch")
-    if contract.get("short_answer_default") != "dormant":
-        raise ValueError("task_continuity_contract.short_answer_default must be dormant")
-    if contract.get("write_intent_requires_arm") is not True:
-        raise ValueError("task_continuity_contract.write_intent_requires_arm must be true")
-    if contract.get("state_storage") != "process_local_only":
-        raise ValueError("task_continuity_contract.state_storage must be process_local_only")
-    if contract.get("authority_granted") is not False:
-        raise ValueError("task_continuity_contract.authority_granted must be false")
     allowed_fields = {
-        "enabled",
-        "schema",
-        "lifecycle_values",
-        "decision_values",
-        "activation_reasons",
-        "progress_status_values",
-        "short_answer_default",
-        "write_intent_requires_arm",
-        "state_storage",
-        "authority_granted",
-        "rule",
+        "enabled", "schema", "lifecycle_values", "decision_values",
+        "activation_reasons", "progress_status_values", "short_answer_default",
+        "write_intent_requires_arm", "state_storage", "authority_granted", "rule",
     }
     unknown_fields = sorted(set(contract) - allowed_fields)
     if unknown_fields:
         raise ValueError(f"task_continuity_contract has unknown fields: {unknown_fields}")
-    reasons = _string_list(
-        contract.get("activation_reasons"),
-        "task_continuity_contract.activation_reasons",
-    )
-    if reasons != [
-        "write_intent",
-        "tool_required",
-        "long_running_task",
-        "multi_stage_task",
-        "task_resume",
-        "open_loop",
-        "prior_failure",
-        "explicit_request",
-        "existing_active_capsule",
-    ]:
-        raise ValueError("task_continuity_contract.activation_reasons mismatch")
-    progress = _string_list(
-        contract.get("progress_status_values"),
-        "task_continuity_contract.progress_status_values",
-    )
-    if progress != ["verified", "inferred", "unknown"]:
-        raise ValueError("task_continuity_contract.progress_status_values mismatch")
+    if contract.get("enabled") is not True:
+        raise ValueError("task_continuity_contract.enabled must be true")
+    if contract.get("schema") != "cbh.task_continuity_contract.v1":
+        raise ValueError("task_continuity_contract.schema is unsupported")
+    expected = {
+        "lifecycle_values": ["DORMANT", "ARMED", "ACTIVE", "VERIFYING", "RETIRED"],
+        "decision_values": ["dormant", "observe_once", "arm", "continue"],
+        "activation_reasons": [
+            "write_intent", "tool_required", "long_running_task", "multi_stage_task",
+            "task_resume", "open_loop", "prior_failure", "explicit_request",
+            "existing_active_capsule", "plan_observed",
+        ],
+        "progress_status_values": ["verified", "inferred", "unknown"],
+    }
+    normalized = copy.deepcopy(contract)
+    for field, values in expected.items():
+        actual = _string_list(contract.get(field), f"task_continuity_contract.{field}")
+        if actual != values:
+            raise ValueError(f"task_continuity_contract.{field} mismatch")
+        normalized[field] = actual
+    if contract.get("short_answer_default") != "dormant":
+        raise ValueError("task_continuity_contract.short_answer_default must be dormant")
+    if contract.get("write_intent_requires_arm") is not False:
+        raise ValueError("task_continuity_contract.write_intent_requires_arm must be false")
+    if contract.get("state_storage") != "persistent_tasks_local_cumcwork_only":
+        raise ValueError("task_continuity_contract.state_storage must be persistent_tasks_local_cumcwork_only")
+    if contract.get("authority_granted") is not False:
+        raise ValueError("task_continuity_contract.authority_granted must be false")
     if not str(contract.get("rule") or "").strip():
         raise ValueError("task_continuity_contract.rule must be non-empty")
-    normalized = copy.deepcopy(contract)
-    normalized["lifecycle_values"] = lifecycle
-    normalized["decision_values"] = decisions
-    normalized["activation_reasons"] = reasons
-    normalized["progress_status_values"] = progress
     return normalized
 
 
@@ -407,60 +501,46 @@ def _normal_engineering_execution_contract(
     if not isinstance(contract, dict):
         raise ValueError("engineering_execution_contract must be a table")
     allowed_fields = {
-        "enabled",
-        "schema",
-        "profile_values",
-        "profile_triggers",
-        "state_storage",
-        "authority_granted",
-        "source_refs",
-        "rule",
+        "enabled", "schema", "profile_values", "profile_triggers",
+        "state_storage", "authority_granted", "source_refs", "rule",
     }
     unknown_fields = sorted(set(contract) - allowed_fields)
     if unknown_fields:
-        raise ValueError(
-            f"engineering_execution_contract has unknown fields: {unknown_fields}"
-        )
+        raise ValueError(f"engineering_execution_contract has unknown fields: {unknown_fields}")
     if contract.get("enabled") is not True:
         raise ValueError("engineering_execution_contract.enabled must be true")
     if contract.get("schema") != "cbh.engineering_execution_contract.v1":
         raise ValueError("engineering_execution_contract.schema is unsupported")
-    profiles = _string_list(
-        contract.get("profile_values"),
-        "engineering_execution_contract.profile_values",
-    )
     expected_profiles = [
-        "tracer_bullet_plan",
-        "deep_module_review",
-        "skill_invocation_topology",
-        "adapter_seam_review",
+        "tracer_bullet_plan", "deep_module_review",
+        "skill_invocation_topology", "adapter_seam_review",
     ]
+    profiles = _string_list(
+        contract.get("profile_values"), "engineering_execution_contract.profile_values"
+    )
     if profiles != expected_profiles:
         raise ValueError("engineering_execution_contract.profile_values mismatch")
     triggers = contract.get("profile_triggers")
     if not isinstance(triggers, dict) or list(triggers) != expected_profiles:
         raise ValueError("engineering_execution_contract.profile_triggers mismatch")
-    normalized_triggers = {
+    normalized = copy.deepcopy(contract)
+    normalized["profile_values"] = profiles
+    normalized["profile_triggers"] = {
         profile: _string_list(
             triggers.get(profile),
             f"engineering_execution_contract.profile_triggers.{profile}",
         )
         for profile in expected_profiles
     }
+    normalized["source_refs"] = _string_list(
+        contract.get("source_refs"), "engineering_execution_contract.source_refs"
+    )
     if contract.get("state_storage") != "none":
         raise ValueError("engineering_execution_contract.state_storage must be none")
     if contract.get("authority_granted") is not False:
         raise ValueError("engineering_execution_contract.authority_granted must be false")
-    source_refs = _string_list(
-        contract.get("source_refs"),
-        "engineering_execution_contract.source_refs",
-    )
     if not str(contract.get("rule") or "").strip():
         raise ValueError("engineering_execution_contract.rule must be non-empty")
-    normalized = copy.deepcopy(contract)
-    normalized["profile_values"] = profiles
-    normalized["profile_triggers"] = normalized_triggers
-    normalized["source_refs"] = source_refs
     return normalized
 
 
@@ -678,6 +758,35 @@ def _normal_referenced_conversation_memory_contract(
     return normalized
 
 
+def _normal_vague_memory_recall_contract(
+    authoring: dict[str, Any],
+) -> dict[str, Any] | None:
+    router = authoring.get("router_decision_contract", {})
+    if not isinstance(router, dict):
+        raise ValueError("router_decision_contract must be a table")
+    contract = router.get("vague_memory_recall_contract")
+    if contract is None:
+        return None
+    if not isinstance(contract, dict) or contract.get("enabled") is not True:
+        raise ValueError("vague_memory_recall_contract must be an enabled table")
+    normalized: dict[str, Any] = {"enabled": True}
+    for field in ("retrospective_markers", "incident_markers", "temporal_fragment_patterns"):
+        normalized[field] = _string_list(
+            contract.get(field),
+            f"router_decision_contract.vague_memory_recall_contract.{field}",
+        )
+    for field in ("candidate_only_rule", "payload_open_rule"):
+        value = contract.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"vague_memory_recall_contract.{field} must be a non-empty string")
+        normalized[field] = value
+    max_candidates = int(contract.get("max_candidates") or 0)
+    if max_candidates < 1 or max_candidates > 5:
+        raise ValueError("vague_memory_recall_contract.max_candidates must be between 1 and 5")
+    normalized["max_candidates"] = max_candidates
+    return normalized
+
+
 def _normal_causal_attribution_triggers(authoring: dict[str, Any]) -> dict[str, Any] | None:
     router = authoring.get("router_decision_contract", {})
     if not isinstance(router, dict):
@@ -711,50 +820,6 @@ def _normal_issue_prevention_gates(authoring: dict[str, Any]) -> dict[str, Any] 
             "triggers": _string_list(gate.get("triggers"), f"issue_prevention_gates.{name}.triggers"),
         }
     return normalized
-
-
-def _normal_direct_outcome_first_contract(authoring: dict[str, Any]) -> dict[str, Any] | None:
-    router = authoring.get("router_decision_contract", {})
-    if not isinstance(router, dict):
-        raise ValueError("router_decision_contract must be a table")
-    contract = router.get("direct_outcome_first_contract")
-    if contract is None:
-        return None
-    if not isinstance(contract, dict):
-        raise ValueError("direct_outcome_first_contract must be a table")
-    if contract.get("enabled") is not True:
-        raise ValueError("direct_outcome_first_contract.enabled must be true")
-    return {
-        "enabled": True,
-        "required_gate": str(contract.get("required_gate") or "direct_outcome_first_gate"),
-        "purpose": str(contract.get("purpose") or ""),
-        "surface_terms": _string_list(
-            contract.get("surface_terms"), "direct_outcome_first_contract.surface_terms"
-        ),
-        "mutation_terms": _string_list(
-            contract.get("mutation_terms"), "direct_outcome_first_contract.mutation_terms"
-        ),
-        "non_mutation_intent_terms": _string_list(
-            contract.get("non_mutation_intent_terms"),
-            "direct_outcome_first_contract.non_mutation_intent_terms",
-        ),
-        "bounded_scope_terms": _string_list(
-            contract.get("bounded_scope_terms"), "direct_outcome_first_contract.bounded_scope_terms"
-        ),
-        "explicit_systemic_scope_terms": _string_list(
-            contract.get("explicit_systemic_scope_terms"),
-            "direct_outcome_first_contract.explicit_systemic_scope_terms",
-        ),
-        "proxy_artifact_terms": _string_list(
-            contract.get("proxy_artifact_terms"), "direct_outcome_first_contract.proxy_artifact_terms"
-        ),
-        "first_mutation_rule": str(contract.get("first_mutation_rule") or ""),
-        "expansion_allowed_only_if": _string_list(
-            contract.get("expansion_allowed_only_if"),
-            "direct_outcome_first_contract.expansion_allowed_only_if",
-        ),
-        "retire_condition": str(contract.get("retire_condition") or ""),
-    }
 
 
 def _normal_search_and_learning_decision_matrix(
@@ -1039,12 +1104,6 @@ def _normal_behavior_correction_contract(
 
 def compile_policy(base_policy: dict[str, Any], authoring: dict[str, Any]) -> dict[str, Any]:
     compiled = copy.deepcopy(base_policy)
-    compiled.get("router_decision_contract", {}).pop(
-        "referenced_conversation_memory_contract", None
-    )
-    compiled.get("runtime_enforcement", {}).pop(
-        "dangerous_delete_advisory_contract", None
-    )
 
     risk_rules = _normal_risk_trigger_rules(authoring)
     if risk_rules:
@@ -1093,6 +1152,31 @@ def compile_policy(base_policy: dict[str, Any], authoring: dict[str, Any]) -> di
             compiled,
             ("router_decision_contract", "harness_governance_recall_triggers"),
             harness_governance_recall_triggers,
+        )
+
+    for field in (
+        "tool_discovery_status_values",
+        "skill_or_tool_need_values",
+        "preferred_call_surface_values",
+    ):
+        value = _normal_router_string_list(authoring, field)
+        if value is not None:
+            _set_path(compiled, ("router_decision_contract", field), value)
+
+    tool_surface_discovery_rule = _normal_tool_surface_discovery_rule(authoring)
+    if tool_surface_discovery_rule is not None:
+        _set_path(
+            compiled,
+            ("router_decision_contract", "tool_surface_discovery_rule"),
+            tool_surface_discovery_rule,
+        )
+
+    capability_discovery_contract = _normal_capability_discovery_contract(authoring)
+    if capability_discovery_contract is not None:
+        _set_path(
+            compiled,
+            ("router_decision_contract", "capability_discovery_contract"),
+            capability_discovery_contract,
         )
 
     reflexive_gap_contract = _normal_reflexive_gap_contract(authoring)
@@ -1157,6 +1241,14 @@ def compile_policy(base_policy: dict[str, Any], authoring: dict[str, Any]) -> di
             referenced_conversation_memory_contract,
         )
 
+    vague_memory_recall_contract = _normal_vague_memory_recall_contract(authoring)
+    if vague_memory_recall_contract is not None:
+        _set_path(
+            compiled,
+            ("router_decision_contract", "vague_memory_recall_contract"),
+            vague_memory_recall_contract,
+        )
+
     causal_contract = _normal_causal_attribution_contract(authoring)
     if causal_contract is not None:
         _set_path(compiled, ("router_decision_contract", "causal_attribution_contract"), causal_contract)
@@ -1168,14 +1260,6 @@ def compile_policy(base_policy: dict[str, Any], authoring: dict[str, Any]) -> di
     issue_prevention_gates = _normal_issue_prevention_gates(authoring)
     if issue_prevention_gates is not None:
         _set_path(compiled, ("router_decision_contract", "issue_prevention_gates"), issue_prevention_gates)
-
-    direct_outcome_first = _normal_direct_outcome_first_contract(authoring)
-    if direct_outcome_first is not None:
-        _set_path(
-            compiled,
-            ("router_decision_contract", "direct_outcome_first_contract"),
-            direct_outcome_first,
-        )
 
     full_lane = _normal_full_lane(authoring)
     if full_lane is not None:

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from harness_action_consumer import build_action_consumption
+from harness_action_consumer import DEFAULT_COMMON_ERROR_META, build_action_consumption
 from task_continuity import apply_task_event
 from task_continuity_workfile import append_cumcwork_snapshot, rehydrate_cumcwork
 
@@ -51,6 +51,7 @@ def bind_memory_query_to_workfile(
     query_type: str = "history_reason",
     query_basis: str = "global_goal",
     tool_input_text: str = "",
+    meta_path: Path = DEFAULT_COMMON_ERROR_META,
 ) -> dict[str, Any]:
     if query_type not in QUERY_TYPES:
         raise ValueError("unsupported_memory_query_type")
@@ -74,6 +75,8 @@ def bind_memory_query_to_workfile(
         else active.get("objective") or ""
     )
     if query_basis == "global_goal":
+        if not global_prompt.strip():
+            raise ValueError("global_goal_query_requires_nonempty_objective")
         effective_prompt = global_prompt
     elif query_basis == "current_turn":
         effective_prompt = prompt
@@ -81,10 +84,13 @@ def bind_memory_query_to_workfile(
         effective_prompt = "\n".join(
             value for value in (global_prompt, prompt) if value
         )
+        if not effective_prompt.strip():
+            raise ValueError("memory_query_requires_nonempty_prompt")
     consumption = build_action_consumption(
         dict(route),
         prompt=effective_prompt,
         tool_input_text=tool_input_text,
+        meta_path=Path(meta_path),
         query_type=query_type,
     )
     applied = apply_task_event(
@@ -208,6 +214,7 @@ def main() -> int:
     parser.add_argument("--query-type", choices=sorted(QUERY_TYPES), default="history_reason")
     parser.add_argument("--query-basis", choices=sorted(QUERY_BASES), default="global_goal")
     parser.add_argument("--tool-input-text", default="")
+    parser.add_argument("--meta-path", default=str(DEFAULT_COMMON_ERROR_META))
     args = parser.parse_args()
     if args.operation == "record-opened-evidence":
         if not (args.evidence_ref_file or args.evidence_ref_json):
@@ -230,6 +237,7 @@ def main() -> int:
             query_type=args.query_type,
             query_basis=args.query_basis,
             tool_input_text=args.tool_input_text,
+            meta_path=Path(args.meta_path),
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0

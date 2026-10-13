@@ -86,6 +86,7 @@ policy.
 | Profile | Required adapter surface | Boundary |
 | --- | --- | --- |
 | `codex-local-minimal` | root instruction, compiled policy, direct gates, action consumer, correction closure | hook activation still requires the exact installed Codex lifecycle |
+| `codex-local-source-recall` | complete minimal profile plus text reader and explicitly configured context-recall adapter | private source configuration and real host callbacks must be supplied and verified by the adopter |
 
 ### D. Build And Maintenance Files
 

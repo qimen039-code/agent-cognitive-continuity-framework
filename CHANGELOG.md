@@ -6,6 +6,22 @@ This project uses `vMAJOR.MINOR.PATCH` version labels.
 
 ## Unreleased
 
+## v1.2.8 - 2026-10-13
+
+- Synchronized maintained runtime sources, including current nested tool
+  argument support, exact v3 record discovery/read separation, incident reuse
+  boundaries and task/memory source handling.
+- Added the source-preserving text reader and optional bounded context-recall
+  adapter, with private configuration templates and portable regression data.
+- Added focused text-reading and capability-fallback skills, and narrowed the
+  existing maintenance/error/solution entrypoints to their relevant actions.
+- Updated model-facing guidance to retain task-scoped authorization and use
+  direct valid sources without mandatory full-depth lookup or ordinary-task
+  routing receipts.
+- Updated dependency-closed deployment profiles and host support boundaries;
+  public packages contain no maintainer memory, live lane registry or host
+  activation proof.
+
 ## v1.2.7 - 2026-08-24
 
 - Added deterministic runtime projections for global-goal-to-local-action

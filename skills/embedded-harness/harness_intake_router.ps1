@@ -1,6 +1,7 @@
 ﻿param(
   [string]$TaskText = "",
   [string]$Cwd = (Get-Location).Path,
+  [string]$ThreadId = $env:CODEX_THREAD_ID,
   [ValidateSet("diagnostic", "compact")]
   [string]$ReceiptMode = "diagnostic",
   [string]$OutputPath = "",
@@ -168,6 +169,13 @@ function Get-ProjectLane([string]$path) {
   return "PROJECTLESS"
 }
 
+function Get-ProjectMemoryRoots([string]$lane) {
+  $roots = Get-ObjectPropertyValue $policy.memory_roots $lane
+  return @(ConvertTo-Array $roots | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([string]$_)
+  } | Select-Object -Unique)
+}
+
 function Test-TaskContainsAny($patterns) {
   foreach ($pattern in (ConvertTo-Array $patterns)) {
     $text = [string]$pattern
@@ -189,6 +197,26 @@ function Get-TaskMatchedTerms($patterns) {
       continue
     }
     if ([regex]::IsMatch($TaskText, [regex]::Escape($text), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+      $terms += $text
+    }
+  }
+  return @($terms | Select-Object -Unique)
+}
+
+function Get-CapabilityMatchedTerms($patterns) {
+  $terms = @()
+  foreach ($pattern in (ConvertTo-Array $patterns)) {
+    $text = [string]$pattern
+    if ([string]::IsNullOrWhiteSpace($text)) {
+      continue
+    }
+    $escaped = [regex]::Escape($text)
+    $expression = if ($text -match '^[A-Za-z0-9_]+$') {
+      "(?<![A-Za-z0-9_])$escaped(?![A-Za-z0-9_])"
+    } else {
+      $escaped
+    }
+    if ([regex]::IsMatch($TaskText, $expression, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
       $terms += $text
     }
   }
@@ -270,6 +298,18 @@ function Get-R5ContextDecision {
   $nonActionContextHits = Get-SourceMatchedTerms -source $sourceText -terms $contextRules.non_action_context_terms
   $contextRequiredCandidateHits = Get-TermIntersection -leftTerms $candidateTerms -rightTerms $contextRules.context_required_candidate_terms
   $alwaysActionCandidateHits = Get-TermIntersection -leftTerms $candidateTerms -rightTerms $contextRules.always_action_candidate_terms
+  $externalRetrievalContract = Get-ObjectPropertyValue $policy.search_and_learning_decision_matrix "external_retrieval_contract"
+  $externalSearchIntentHits = Get-SourceMatchedTerms -source $sourceText -terms (Get-ObjectPropertyValue $externalRetrievalContract "explicit_search_intent_terms")
+  $memoryWriteIntentHits = Get-SourceMatchedTerms -source $sourceText -terms (Get-ObjectPropertyValue $externalRetrievalContract "memory_write_intent_terms")
+  $nonMemoryCandidates = @($candidateTerms | Where-Object { ([string]$_) -notmatch '(?i)memory|记忆' })
+  $memoryTermIsSearchCapability = (
+    ($externalSearchIntentHits.Count -gt 0) -and
+    ($candidateTerms.Count -gt 0) -and
+    ($nonMemoryCandidates.Count -eq 0) -and
+    ($memoryWriteIntentHits.Count -eq 0) -and
+    ($directActionHits.Count -eq 0) -and
+    ($alwaysActionCandidateHits.Count -eq 0)
+  )
 
   if (($explicitActionPhraseHits.Count -gt 0) -and ($explicitActionNegationHits.Count -eq 0)) {
     return [pscustomobject]@{
@@ -279,6 +319,17 @@ function Get-R5ContextDecision {
       candidate_terms = @($candidateTerms)
       negated_terms = @($negatedTerms)
       reason = "explicit_action_phrase_detected"
+    }
+  }
+
+  if ($memoryTermIsSearchCapability) {
+    return [pscustomobject]@{
+      decision = "contextual_review"
+      action_surface = "external_capability_search"
+      promote_to_risk = $false
+      candidate_terms = @($candidateTerms)
+      negated_terms = @($negatedTerms)
+      reason = "memory_term_is_external_search_feature_not_write_action"
     }
   }
 
@@ -356,18 +407,23 @@ function Get-R3ContextDecision {
     }
   }
 
-  $diagnosticHits = Get-SourceMatchedTerms -source $SourceText -terms $contextRules.diagnostic_intent_terms
+  $externalRetrievalContract = Get-ObjectPropertyValue $policy.search_and_learning_decision_matrix "external_retrieval_contract"
+  $diagnosticTerms = @(
+    @(ConvertTo-Array $contextRules.diagnostic_intent_terms) +
+    @(ConvertTo-Array (Get-ObjectPropertyValue $externalRetrievalContract "explicit_search_intent_terms"))
+  )
+  $diagnosticHits = Get-SourceMatchedTerms -source $SourceText -terms $diagnosticTerms
   $decisionOnlyHits = Get-SourceMatchedTerms -source $SourceText -terms $contextRules.decision_only_markers
   $explicitMutationMatchSet = Get-TriggerMatchSet $contextRules.explicit_mutation_phrases
   $explicitMutationHits = @($explicitMutationMatchSet.positive)
   $strongMutationHits = Get-SourceMatchedTerms -source $SourceText -terms $contextRules.strong_mutation_terms
   $effectiveStrongMutationHits = @(
     foreach ($strongTerm in $strongMutationHits) {
-      $coveredByReadOnlyMarker = $false
-      foreach ($readOnlyMarker in @(@($diagnosticHits) + @($decisionOnlyHits))) {
-        if ([string]$readOnlyMarker -like "*$strongTerm*") { $coveredByReadOnlyMarker = $true; break }
+      $coveredByDiagnostic = $false
+      foreach ($diagnosticTerm in @(@($diagnosticHits) + @($decisionOnlyHits))) {
+        if ([string]$diagnosticTerm -like "*$strongTerm*") { $coveredByDiagnostic = $true; break }
       }
-      if (-not $coveredByReadOnlyMarker) { $strongTerm }
+      if (-not $coveredByDiagnostic) { $strongTerm }
     }
   )
 
@@ -384,7 +440,7 @@ function Get-R3ContextDecision {
     }
   }
 
-  if (($diagnosticHits.Count -gt 0) -or ($decisionOnlyHits.Count -gt 0) -or ($effectiveStrongMutationHits.Count -eq 0)) {
+  if (($decisionOnlyHits.Count -gt 0) -or ($effectiveStrongMutationHits.Count -eq 0)) {
     $readOnlyHits = @(@($diagnosticHits) + @($decisionOnlyHits))
     if ($readOnlyHits.Count -eq 0) { $readOnlyHits = @($candidateTerms) }
     return [pscustomobject]@{
@@ -429,7 +485,8 @@ function Get-TargetSurface {
   if (Test-TaskContainsAny @("internal", "private", "local maintainer", "local-only")) { return "private_rule" }
   if (Test-TaskContainsAny @("memory", "history", "_META_INDEX", "capsule", "ERR-", "SOL-")) { return "project_memory" }
   if (Test-TaskContainsAny @("skill", "semantic anchor", "skill matrix")) { return "skill_matrix" }
-  if (Test-TaskContainsAny @("harness", "AGENTS", "policy", "route", "routing", "dynamic evaluation", "decision layer", "governance layer")) { return "local_harness" }
+  if (Test-TaskContainsAny @("harness", "AGENTS", "policy", "route", "routing", "dynamic evaluation", "decision layer", "governance layer", "hidden control layer", "client control layer", "隐藏控制层", "客户端控制层")) { return "local_harness" }
+  if ((Test-TaskContainsAny @("CBH", "Codex 本地 CBH", "本地 CBH")) -and (Test-TaskContainsAny @("framework", "control layer", "框架", "控制层", "路由", "治理"))) { return "local_harness" }
   return "current_chat"
 }
 
@@ -469,6 +526,72 @@ function Get-FirstPrinciplesDecision([string]$riskLevel, [string]$surface) {
   }
 }
 
+function Get-ReflexiveGapDecision {
+  $contract = Get-ObjectPropertyValue $policy.router_decision_contract "reflexive_gap_contract"
+  if (($null -eq $contract) -or ((Get-ObjectPropertyValue $contract "enabled") -eq $false)) {
+    return [pscustomobject]@{ active = $false; signals = @(); trigger_hits = @(); exclusions = @(); gate = ""; marker = "" }
+  }
+
+  $explicitHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $contract "explicit_request_triggers"))
+  $exclusionHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $contract "exclusion_triggers"))
+  $signals = @()
+  $triggerHits = @($explicitHits)
+
+  $knowledgeGroups = Get-ObjectPropertyValue $contract "knowledge_action_groups"
+  $knowledgeHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $knowledgeGroups "knowledge"))
+  $executionHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $knowledgeGroups "execution"))
+  $contrastHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $knowledgeGroups "contrast"))
+  if (($knowledgeHits.Count -gt 0) -and ($executionHits.Count -gt 0) -and ($contrastHits.Count -gt 0)) {
+    $signals += "knowledge_action_mismatch"
+    $triggerHits += @($knowledgeHits + $executionHits + $contrastHits)
+  }
+
+  $goalGroups = Get-ObjectPropertyValue $contract "goal_fidelity_groups"
+  $goalHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $goalGroups "goal"))
+  $proxyHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $goalGroups "proxy_or_stall"))
+  if (($goalHits.Count -gt 0) -and ($proxyHits.Count -gt 0)) {
+    $signals += "goal_fidelity_gap"
+    $triggerHits += @($goalHits + $proxyHits)
+  }
+
+  $counterGroups = Get-ObjectPropertyValue $contract "counterevidence_groups"
+  $attributionHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $counterGroups "attribution"))
+  $unverifiedHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $counterGroups "unverified"))
+  if (($attributionHits.Count -gt 0) -and ($unverifiedHits.Count -gt 0)) {
+    $signals += "counterevidence_gap"
+    $triggerHits += @($attributionHits + $unverifiedHits)
+  }
+
+  $coverageGroups = Get-ObjectPropertyValue $contract "knowledge_coverage_groups"
+  $unmodeledHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $coverageGroups "unmodeled"))
+  $impactHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $coverageGroups "high_impact"))
+  $uncertaintyHits = @(Get-MatchedTriggers (Get-ObjectPropertyValue $coverageGroups "uncertainty"))
+  if (($unmodeledHits.Count -gt 0) -and ($impactHits.Count -gt 0) -and ($uncertaintyHits.Count -gt 0)) {
+    $signals += "knowledge_coverage_gap"
+    $triggerHits += @($unmodeledHits + $impactHits + $uncertaintyHits)
+  }
+
+  if ($explicitHits.Count -gt 0) {
+    $signals += "explicit_reflexive_request"
+  }
+  $signals = @($signals | Select-Object -Unique)
+  $triggerHits = @($triggerHits | Select-Object -Unique)
+  $active = ($signals.Count -gt 0)
+  if (($exclusionHits.Count -gt 0) -and ($explicitHits.Count -eq 0)) {
+    $active = $false
+    $signals = @()
+    $triggerHits = @()
+  }
+  return [pscustomobject]@{
+    active = [bool]$active
+    signals = @($signals)
+    trigger_hits = @($triggerHits)
+    exclusions = @($exclusionHits)
+    gate = [string](Get-ObjectPropertyValue $contract "required_gate")
+    marker = [string](Get-ObjectPropertyValue $contract "semantic_marker")
+  }
+}
+
 function Get-Audience([string]$lane) {
   $rules = $policy.router_decision_contract.audience_trigger_rules
   if ($null -ne $rules) {
@@ -485,41 +608,53 @@ function Get-Audience([string]$lane) {
   return "current_chat"
 }
 
-function Find-ActiveConversationMemoryLane([string]$path) {
+function Find-ActiveConversationMemoryLane([string]$path, [string]$expectedThreadId = "") {
   try {
     $current = (Resolve-Path -LiteralPath $path).Path
   } catch {
     $current = $path
   }
+  $requestedPath = Normalize-PathText $current
   for ($depth = 0; $depth -lt 5; $depth++) {
-    if ([string]::IsNullOrWhiteSpace($current)) {
-      break
-    }
+    if ([string]::IsNullOrWhiteSpace($current)) { break }
     $root = Join-Path $current "local-conversation-memory"
     if (Test-Path -LiteralPath $root) {
+      $candidates = @()
       foreach ($lane in Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) {
-        $metaPath = Join-Path $lane.FullName "_META_INDEX.md"
         $indexPath = Join-Path $lane.FullName "index.json"
-        if ((Test-Path -LiteralPath $metaPath) -or (Test-Path -LiteralPath $indexPath)) {
-          $metaText = ""
-          $indexText = ""
-          if (Test-Path -LiteralPath $metaPath) {
-            $metaText = Get-Content -LiteralPath $metaPath -Raw -Encoding UTF8
-          }
-          if (Test-Path -LiteralPath $indexPath) {
-            $indexText = Get-Content -LiteralPath $indexPath -Raw -Encoding UTF8
-          }
-          $combined = "$metaText`n$indexText"
-          if (($combined -match "(?im)(?:lane_state|status)[`"']?\s*[:=]\s*[`"']?active") -or ($combined -match "single_conversation_project_shaped_lane")) {
-            return $lane.FullName
-          }
+        if (-not (Test-Path -LiteralPath $indexPath)) { continue }
+        try {
+          $index = Get-Content -LiteralPath $indexPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+          continue
+        }
+        $state = [string](Get-ObjectPropertyValue $index "lane_state")
+        if ([string]::IsNullOrWhiteSpace($state)) {
+          $state = [string](Get-ObjectPropertyValue $index "status")
+        }
+        if ($state -notmatch "^(?i:ACTIVE)$") { continue }
+        $workspace = [string](Get-ObjectPropertyValue $index "workspace_path")
+        if ((-not [string]::IsNullOrWhiteSpace($workspace)) -and
+            (-not (Test-PathInsideRoot $requestedPath $workspace))) { continue }
+        $laneThreadId = [string](Get-ObjectPropertyValue $index "thread_id")
+        if ((-not [string]::IsNullOrWhiteSpace($expectedThreadId)) -and
+            (-not [string]::IsNullOrWhiteSpace($laneThreadId)) -and
+            ($laneThreadId -ne $expectedThreadId)) { continue }
+        $exactWorkspace = (-not [string]::IsNullOrWhiteSpace($workspace)) -and
+          ((Normalize-PathText $workspace).Equals($requestedPath, [System.StringComparison]::OrdinalIgnoreCase))
+        $candidates += [pscustomobject]@{
+          path = $lane.FullName
+          exact_workspace = [bool]$exactWorkspace
+          thread_id = $laneThreadId
         }
       }
+      $exact = @($candidates | Where-Object { $_.exact_workspace })
+      if ($exact.Count -eq 1) { return [string]$exact[0].path }
+      if ($candidates.Count -eq 1) { return [string]$candidates[0].path }
+      return ""
     }
     $parent = Split-Path -Parent $current
-    if (($parent -eq $current) -or [string]::IsNullOrWhiteSpace($parent)) {
-      break
-    }
+    if (($parent -eq $current) -or [string]::IsNullOrWhiteSpace($parent)) { break }
     $current = $parent
   }
   return ""
@@ -626,7 +761,8 @@ function Find-ReferencedConversationMemoryRegistryMatch($contract, [string]$task
 Import-LocalProjectLaneOverlay
 
 $projectLane = Get-ProjectLane $Cwd
-$activeConversationMemoryLanePath = Find-ActiveConversationMemoryLane $Cwd
+$projectMemoryRoots = @(Get-ProjectMemoryRoots $projectLane)
+$activeConversationMemoryLanePath = Find-ActiveConversationMemoryLane $Cwd $ThreadId
 $hasActiveConversationMemoryLane = -not [string]::IsNullOrWhiteSpace($activeConversationMemoryLanePath)
 $referencedConversationMemoryContract = Get-ObjectPropertyValue $policy.router_decision_contract "referenced_conversation_memory_contract"
 $referencedConversationRegistryMatch = [pscustomobject]@{ status = "not_evaluated"; registry_path = ""; candidates = @() }
@@ -725,6 +861,47 @@ foreach ($riskName in (ConvertTo-Array $policy.risk_order_high_to_low)) {
   }
 }
 
+$globalHighImpactSurfacePattern = '(?i)(?:global\s+AGENTS(?:\.md)?|全局\s*AGENTS(?:\.md)?|\.codex[\\/]AGENTS\.md|config\.toml)'
+$globalHighImpactMutationPattern = '(?i)(?:modify|update|fix|patch|add|write|replace|rewrite|change|sync|修改|更新|修复|补丁|增加|添加|加入|加一段|写入|替换|重写|改动|同步)'
+$globalHighImpactNegationPattern = '(?i)(?:do not|don''t|no need to|不要|无需|不需要|禁止).{0,24}'
+$globalHighImpactHistoricalPattern = '(?i)(?:previous\s+change|last\s+modification|historical\s+change|caused\s+by\s+the\s+previous\s+change|上次修改|之前修改|历史改动|当时改动|上次改动造成)'
+$globalHighImpactCurrentActionPattern = '(?i)(?:please\s+modify|modify\s+it\s+now|change\s+it\s+now|apply\s+the\s+config\s+change|现在修改|请修改|执行修改|改回配置)'
+$globalHighImpactHistoricalOnly = (
+  [regex]::IsMatch($TaskText, $globalHighImpactHistoricalPattern) -and
+  (-not [regex]::IsMatch($TaskText, $globalHighImpactCurrentActionPattern))
+)
+$globalHighImpactSurfaceMutation = (
+  ([regex]::IsMatch($TaskText, "$globalHighImpactMutationPattern.{0,32}$globalHighImpactSurfacePattern") -or
+   [regex]::IsMatch($TaskText, "$globalHighImpactSurfacePattern.{0,32}$globalHighImpactMutationPattern")) -and
+  (-not [regex]::IsMatch($TaskText, "$globalHighImpactNegationPattern(?:$globalHighImpactSurfacePattern|$globalHighImpactMutationPattern)")) -and
+  (-not $globalHighImpactHistoricalOnly)
+)
+if ($globalHighImpactSurfaceMutation) {
+  $risk = "R5"
+  $triggeredRisks += "R5"
+  $existingR5Matches = @()
+  if ($matchedRiskTriggers.Contains("R5")) {
+    $existingR5Matches = @($matchedRiskTriggers["R5"])
+  }
+  $matchedRiskTriggers["R5"] = @($existingR5Matches + "global_configuration_mutation" | Select-Object -Unique)
+  $riskCandidates["R5"] = @($matchedRiskTriggers["R5"])
+  $risk_context_decisions["R5"] = [pscustomobject]@{
+    decision = "global_configuration_mutation"
+    action_surface = "actionable_R5"
+    promote_to_risk = $true
+    candidate_terms = @("global_configuration_mutation")
+    negated_terms = @()
+    diagnostic_terms = @()
+    reason = "global_agents_or_config_mutation"
+  }
+  foreach ($gate in (ConvertTo-Array (Get-ObjectPropertyValue $policy.risk_gate_rules "R5"))) {
+    $requiredGates += [string]$gate
+  }
+  foreach ($approvalRule in (ConvertTo-Array (Get-ObjectPropertyValue $policy.risk_approval_rules "R5"))) {
+    $approval += [string]$approvalRule
+  }
+}
+
 if ($triggeredRisks.Count -eq 0) {
   $fallbackMatched = Get-MatchedTriggers $policy.fallback_boundary_triggers
   $fallbackShortTextMaxChars = 30
@@ -794,21 +971,80 @@ $derivedExternalSignalMatchSet = Get-DerivedExternalSignalMatchSet $TaskText
 $externalPositive += @($derivedExternalSignalMatchSet.positive)
 $externalNegative += @($derivedExternalSignalMatchSet.negated)
 $typedExternalIdentifierPattern = '(?i)\bRFC\s*-?\s*\d{3,5}\b|\bCVE-\d{4}-\d{4,}\b|\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b|\barXiv\s*:\s*\d{4}\.\d{4,5}(?:v\d+)?\b|\barXiv\s+\d{4}\.\d{4,5}(?:v\d+)?\b|\b(?:ISO(?:/IEC)?|IEC|IEEE)\s+\d+(?:[-:]\d+)*(?::\d{4})?\b|(?<![A-Za-z0-9_.-])@[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*|\b(?:PyPI|npm|Hugging\s*Face)\b'
+$hasTypedExternalIdentifier = [regex]::IsMatch($TaskText, $typedExternalIdentifierPattern)
+$needsExternalResearch = ($externalPositive.Count -gt 0) -and ($localOnlySearchHits.Count -eq 0)
+$localCurrentMemoryReadTriggers = Get-ObjectPropertyValue $policy.router_decision_contract "conversation_memory_read_triggers"
+$localCurrentMemoryReadIntent = (
+  ((Get-MatchedTriggers $localCurrentMemoryReadTriggers).Count -gt 0) -or
+  (
+    (Test-TaskContainsAny @("conversation memory", "thread memory", "对话记忆", "上一段对话记忆")) -and
+    (Test-TaskContainsAny @("read-only", "inspect", "check", "verify", "link", "只读", "检查", "核查", "查看", "链接", "对齐"))
+  )
+)
+if ($localCurrentMemoryReadIntent) {
+  $localMemoryExternalNoise = @("current", "当前", "link", "links", "链接")
+  $externalPositive = @(
+    $externalPositive | Where-Object {
+      $candidate = [string]$_
+      -not ($localMemoryExternalNoise | Where-Object { $_ -ieq $candidate })
+    }
+  )
+  $needsExternalResearch = $externalPositive.Count -gt 0
+  if (($risk -eq "R4") -and $matchedRiskTriggers.Contains("R4")) {
+    $remainingR4 = @($matchedRiskTriggers["R4"] | Where-Object { [string]$_ -ne "current" })
+    if ($remainingR4.Count -eq 0) {
+      $matchedRiskTriggers.Remove("R4")
+      $triggeredRisks = @($triggeredRisks | Where-Object { $_ -ne "R4" })
+      $risk = if ($triggeredRisks -contains "R1") { "R1" } else { "R0" }
+    }
+  }
+}
 $hasExplicitSearchIntent = @($explicitSearchIntentMatchSet.positive).Count -gt 0
 $ownerRepoPattern = '(?i)(?<![A-Za-z0-9_.-])[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}(?![A-Za-z0-9_.-])'
 $hasOwnerRepoAnchor = $hasExplicitSearchIntent -and [regex]::IsMatch($TaskText, $ownerRepoPattern)
-$hasQuotedExternalAnchor = [regex]::IsMatch($TaskText, '["“][^"”\r\n]{2,200}["”]')
-$hasDirectExternalAnchor = [regex]::IsMatch($TaskText, '(?i)https?://|\b(?:v\d+(?:\.\d+){1,3})\b') -or [regex]::IsMatch($TaskText, $typedExternalIdentifierPattern)
+$hasQuotedExternalAnchor = $needsExternalResearch -and [regex]::IsMatch($TaskText, '["“][^"”\r\n]{2,200}["”]')
+$hasDirectExternalAnchor = $needsExternalResearch -and (
+  [regex]::IsMatch($TaskText, '(?i)https?://|\b(?:v\d+(?:\.\d+){1,3})\b') -or
+  $hasTypedExternalIdentifier
+)
 $hasExactExternalAnchor = $hasOwnerRepoAnchor -or $hasQuotedExternalAnchor -or $hasDirectExternalAnchor
-$needsExternalResearch = ($externalPositive.Count -gt 0) -and ($localOnlySearchHits.Count -eq 0)
+$externalRetrievalProfile = if (-not $needsExternalResearch) {
+  "none"
+} elseif ($hasExactExternalAnchor) {
+  "exact_anchor_first"
+} else {
+  "facet_coverage"
+}
+
+if (($localOnlySearchHits.Count -gt 0) -and ($risk -eq "R4") -and $matchedRiskTriggers.Contains("R4")) {
+  $searchTerms = @(ConvertTo-Array (Get-ObjectPropertyValue $externalRetrievalContract "explicit_search_intent_terms"))
+  $remainingR4 = @($matchedRiskTriggers["R4"] | Where-Object { (Get-TermIntersection -leftTerms @($_) -rightTerms $searchTerms).Count -eq 0 })
+  if ($remainingR4.Count -eq 0) {
+    $matchedRiskTriggers.Remove("R4")
+    $triggeredRisks = @($triggeredRisks | Where-Object { $_ -ne "R4" })
+    $risk = if ($triggeredRisks -contains "R3") { "R3" } elseif ($triggeredRisks -contains "R1") { "R1" } else { "R0" }
+  }
+}
 if ($needsExternalResearch) {
-  $matchedRiskTriggers["external_research"] = @($externalPositive | Select-Object -Unique)
+  $matchedRiskTriggers["external_research"] = @($externalPositive)
+  if ($risk -ne "R5") {
+    $risk = "R4"
+    $triggeredRisks += "R4"
+    $existingR4Matches = @()
+    if ($matchedRiskTriggers.Contains("R4")) {
+      $existingR4Matches = @($matchedRiskTriggers["R4"])
+    }
+    $matchedRiskTriggers["R4"] = @($existingR4Matches + $externalPositive | Select-Object -Unique)
+    foreach ($gate in (ConvertTo-Array (Get-ObjectPropertyValue $policy.risk_gate_rules "R4"))) {
+      $requiredGates += [string]$gate
+    }
+  }
   if ($hasExactExternalAnchor) {
     $requiredGates += "exact_anchor_preservation_gate"
   }
 }
-if ($externalNegative.Count -gt 0) {
-  $negatedRiskTriggers["external_research"] = @($externalNegative)
+if (($externalNegative.Count -gt 0) -or ($localOnlySearchHits.Count -gt 0)) {
+  $negatedRiskTriggers["external_research"] = @($externalNegative + $localOnlySearchHits | Select-Object -Unique)
 }
 
 $targetSurface = if ($skillAuditProfile -ne "none") { "skill_matrix" } else { Get-TargetSurface }
@@ -862,39 +1098,6 @@ if ($feedbackLoopHits.Count -gt 0) {
   $matchedRiskTriggers["feedback_loop"] = @($feedbackLoopHits)
   $feedbackLoopProfile = "explicit_cycle"
 }
-$directOutcomeFirstInstruction = $null
-$directOutcomeFirst = Get-ObjectPropertyValue $policy.router_decision_contract "direct_outcome_first_contract"
-if (($null -ne $directOutcomeFirst) -and ([bool](Get-ObjectPropertyValue $directOutcomeFirst "enabled"))) {
-  $directSurfaceHits = Get-MatchedTriggers (Get-ObjectPropertyValue $directOutcomeFirst "surface_terms")
-  $directMutationHits = Get-MatchedTriggers (Get-ObjectPropertyValue $directOutcomeFirst "mutation_terms")
-  $directNonMutationHits = Get-MatchedTriggers (Get-ObjectPropertyValue $directOutcomeFirst "non_mutation_intent_terms")
-  $directBoundedHits = Get-MatchedTriggers (Get-ObjectPropertyValue $directOutcomeFirst "bounded_scope_terms")
-  $directSystemicHits = Get-MatchedTriggers (Get-ObjectPropertyValue $directOutcomeFirst "explicit_systemic_scope_terms")
-  $directProxyHits = Get-MatchedTriggers (Get-ObjectPropertyValue $directOutcomeFirst "proxy_artifact_terms")
-  if (($directSurfaceHits.Count -gt 0) -and
-      ($directMutationHits.Count -gt 0) -and
-      ($directNonMutationHits.Count -eq 0) -and
-      ($directSystemicHits.Count -eq 0)) {
-    $directOutcomeGate = [string](Get-ObjectPropertyValue $directOutcomeFirst "required_gate")
-    if ([string]::IsNullOrWhiteSpace($directOutcomeGate)) {
-      $directOutcomeGate = "direct_outcome_first_gate"
-    }
-    $semanticAmbiguity += @($directOutcomeGate)
-    $requiredGates += $directOutcomeGate
-    $directOutcomeHits = @(
-      @($directSurfaceHits) +
-      @($directMutationHits) +
-      @($directBoundedHits) +
-      @($directProxyHits)
-    )
-    $matchedRiskTriggers[$directOutcomeGate] = @($directOutcomeHits | Select-Object -Unique)
-    $directOutcomeFirstInstruction = [ordered]@{
-      first_mutation_rule = [string](Get-ObjectPropertyValue $directOutcomeFirst "first_mutation_rule")
-      expansion_allowed_only_if = @(ConvertTo-Array (Get-ObjectPropertyValue $directOutcomeFirst "expansion_allowed_only_if"))
-      retire_condition = [string](Get-ObjectPropertyValue $directOutcomeFirst "retire_condition")
-    }
-  }
-}
 $issuePreventionGates = Get-ObjectPropertyValue $policy.router_decision_contract "issue_prevention_gates"
 if ($null -ne $issuePreventionGates) {
   foreach ($gateEntry in $issuePreventionGates.PSObject.Properties) {
@@ -921,6 +1124,15 @@ if ((-not $hasActiveConversationMemoryLane) -and
     $semanticAmbiguity += "referenced_conversation_registry_ambiguous"
   }
 }
+$reflexiveGapDecision = Get-ReflexiveGapDecision
+if ($reflexiveGapDecision.active) {
+  $semanticAmbiguity += [string]$reflexiveGapDecision.marker
+  $requiredGates += [string]$reflexiveGapDecision.gate
+  $matchedRiskTriggers[[string]$reflexiveGapDecision.gate] = @($reflexiveGapDecision.signals)
+  $matchedRiskTriggers["reflexive_gap_trigger_hits"] = @($reflexiveGapDecision.trigger_hits)
+} elseif (@($reflexiveGapDecision.exclusions).Count -gt 0) {
+  $negatedRiskTriggers["reflexive_gap_gate"] = @($reflexiveGapDecision.exclusions)
+}
 if ($triggeredRisks -contains "R3") {
   $semanticAmbiguity += @("governance_or_change_surface")
 }
@@ -939,7 +1151,7 @@ if ($null -ne $searchModes) {
     }
   }
 }
-if ($needsExternalResearch -and (@($explicitSearchIntentMatchSet.positive).Count -gt 0)) {
+if ($needsExternalResearch -and $hasExplicitSearchIntent) {
   $externalNeed += "general_web_cross_check"
 }
 if ($needsExternalResearch -and [regex]::IsMatch($TaskText, '(?i)github\.com|\bGitHub\b|仓库|开源')) {
@@ -966,6 +1178,28 @@ if ($null -eq $pairedMemoryTriggers) {
 }
 $explicitMemoryNeedHits = Get-MatchedTriggers $memoryNeedTriggers
 $explicitMemoryNeed = $explicitMemoryNeedHits.Count -gt 0
+$vagueMemoryRecallContract = Get-ObjectPropertyValue $policy.router_decision_contract "vague_memory_recall_contract"
+$vagueRetrospectiveHits = Get-MatchedTriggers (Get-ObjectPropertyValue $vagueMemoryRecallContract "retrospective_markers")
+$vagueIncidentHits = Get-MatchedTriggers (Get-ObjectPropertyValue $vagueMemoryRecallContract "incident_markers")
+$vagueTemporalHits = @()
+$vagueTemporalOnlyHits = @()
+$trimmedTaskText = $TaskText.Trim()
+foreach ($pattern in (ConvertTo-Array (Get-ObjectPropertyValue $vagueMemoryRecallContract "temporal_fragment_patterns"))) {
+  if ([string]::IsNullOrWhiteSpace([string]$pattern)) { continue }
+  if ([regex]::IsMatch($TaskText, [string]$pattern)) {
+    $vagueTemporalHits += [string]$pattern
+    $wholeMatch = [regex]::Match($trimmedTaskText, [string]$pattern)
+    if ($wholeMatch.Success -and ($wholeMatch.Index -eq 0) -and ($wholeMatch.Length -eq $trimmedTaskText.Length)) {
+      $vagueTemporalOnlyHits += [string]$pattern
+    }
+  }
+}
+$shortTemporalFragment = $vagueTemporalOnlyHits.Count -gt 0
+$vagueMemoryRecall = (
+  (($vagueRetrospectiveHits.Count -gt 0) -and (($vagueIncidentHits.Count -gt 0) -or ($vagueTemporalHits.Count -gt 0))) -or
+  (($vagueTemporalHits.Count -gt 0) -and ($vagueIncidentHits.Count -gt 0)) -or
+  $shortTemporalFragment
+)
 $localMemoryAccessIntentHits = Get-MatchedTriggers (Get-ObjectPropertyValue $externalRetrievalContract "local_memory_access_intent_terms")
 $genericMemoryFeatureHits = Get-TermIntersection -leftTerms $explicitMemoryNeedHits -rightTerms (Get-ObjectPropertyValue $externalRetrievalContract "generic_memory_feature_terms")
 if (
@@ -978,24 +1212,47 @@ if (
   $explicitMemoryNeed = $false
 }
 $pairedMemoryHits = Get-MatchedTriggers $pairedMemoryTriggers
+$harnessGovernanceRecallTriggers = $policy.router_decision_contract.harness_governance_recall_triggers
+if ($null -eq $harnessGovernanceRecallTriggers) {
+  $harnessGovernanceRecallTriggers = @("recheck", "recurrence", "disconnect", "drift", "route miss", "capability regression", "重新检查", "复发", "断联", "漂移", "漏判", "能力减弱", "能力衰减")
+}
+$harnessGovernanceRecallHits = @()
+$harnessGovernanceSurface = (
+  ($targetSurface -eq "local_harness") -or
+  (Test-TaskContainsAny @("CBH", "Codex 本地 CBH", "本地 CBH", "harness", "hidden control layer", "隐藏控制层"))
+)
+if ($harnessGovernanceSurface -and ($triggeredRisks -contains "R3")) {
+  $harnessGovernanceRecallHits = Get-MatchedTriggers $harnessGovernanceRecallTriggers
+}
 $staticKnowledgeTriggers = $policy.router_decision_contract.static_knowledge_triggers
 if ($null -eq $staticKnowledgeTriggers) {
   $staticKnowledgeTriggers = @("static knowledge", "project manual", "repository manual", "module map", "project map")
 }
 $staticKnowledgeHits = Get-MatchedTriggers $staticKnowledgeTriggers
-if ($pairedMemoryHits.Count -gt 0) {
+if (($pairedMemoryHits.Count -gt 0) -or ($harnessGovernanceRecallHits.Count -gt 0)) {
   $memoryNeed = "paired_err_sol"
 } elseif ($hasResolvedReferencedConversation) {
   $memoryNeed = [string](Get-ObjectPropertyValue $referencedConversationMemoryContract "memory_need")
-} elseif (($explicitMemoryNeed) -or ($staticKnowledgeHits.Count -gt 0) -or ($feedbackLoopHits.Count -gt 0)) {
+} elseif (($explicitMemoryNeed) -or $vagueMemoryRecall -or ($staticKnowledgeHits.Count -gt 0) -or ($feedbackLoopHits.Count -gt 0)) {
   $memoryNeed = "index_only"
 } else {
   $memoryNeed = "none"
 }
-if ($pairedMemoryHits.Count -gt 0) {
+if ($vagueMemoryRecall) {
+  $semanticAmbiguity += "vague_memory_candidate_discovery"
+  $requiredGates += "unknown_memory_reference_gate"
+  $matchedRiskTriggers["vague_memory_recall"] = @(
+    $vagueRetrospectiveHits + $vagueIncidentHits + $vagueTemporalHits | Select-Object -Unique
+  )
+  if ($risk -eq "R0") {
+    $risk = "R1"
+    $triggeredRisks += "R1"
+  }
+}
+if (($pairedMemoryHits.Count -gt 0) -or ($harnessGovernanceRecallHits.Count -gt 0)) {
   $semanticAmbiguity += @("feedback_loop_required")
   $requiredGates += "feedback_loop_gate"
-  $matchedRiskTriggers["feedback_loop_memory"] = @($pairedMemoryHits)
+  $matchedRiskTriggers["feedback_loop_memory"] = @($pairedMemoryHits + $harnessGovernanceRecallHits | Select-Object -Unique)
   if ($feedbackLoopProfile -ne "explicit_cycle") {
     $feedbackLoopProfile = "prevention_review"
   }
@@ -1056,7 +1313,7 @@ $r5CandidatesForMemoryIntent = @()
 if (($null -ne $r5DecisionForMemoryIntent) -and ((Get-ObjectPropertyValue $r5DecisionForMemoryIntent "promote_to_risk") -eq $true)) {
   $r5CandidatesForMemoryIntent = @(ConvertTo-Array (Get-ObjectPropertyValue $r5DecisionForMemoryIntent "candidate_terms"))
 }
-$explicitLongTermMemoryWriteIntent = (($r5CandidatesForMemoryIntent | Where-Object { ([string]$_) -in @("write memory", "写入记忆") }).Count -gt 0)
+$explicitLongTermMemoryWriteIntent = (($r5CandidatesForMemoryIntent | Where-Object { ([string]$_) -in @("long-term memory", "write memory", "长期记忆", "写入记忆") }).Count -gt 0)
 if ($commonErrorHits.Count -gt 0) {
   if ($commonErrorWriteIntent) {
     if ($feedbackLoopProfile -eq "none") {
@@ -1076,11 +1333,25 @@ if ($commonErrorHits.Count -gt 0) {
     }
     $matchedRiskTriggers["common_error_index_hint"] = @($commonErrorHits)
   }
+} elseif (($commonErrorPreventionHits.Count -gt 0) -and ($explicitMemoryNeed -or $harnessGovernanceSurface)) {
+  $semanticAmbiguity += @("feedback_loop_required")
+  $requiredGates += "feedback_loop_gate"
+  $matchedRiskTriggers["feedback_loop_prevention_reference"] = @($commonErrorPreventionHits)
+  if ($memoryNeed -eq "none") {
+    $memoryNeed = "index_only"
+  }
+  if ($feedbackLoopProfile -ne "explicit_cycle") {
+    $feedbackLoopProfile = "prevention_review"
+  }
 }
 $semanticAmbiguity = @($semanticAmbiguity | Select-Object -Unique)
 $conversationExplicitTriggers = $policy.router_decision_contract.conversation_memory_explicit_triggers
 if ($null -eq $conversationExplicitTriggers) {
-  $conversationExplicitTriggers = @("remember this conversation", "checkpoint this conversation", "continue this conversation later", "conversation memory", "thread memory")
+  $conversationExplicitTriggers = @("remember this conversation", "checkpoint this conversation", "continue this conversation later", "create this conversation memory", "update current conversation memory")
+}
+$conversationMemoryReadTriggers = $policy.router_decision_contract.conversation_memory_read_triggers
+if ($null -eq $conversationMemoryReadTriggers) {
+  $conversationMemoryReadTriggers = @("read current conversation memory", "读取当前对话记忆", "读取当前对话的记忆文件")
 }
 $conversationSignalTriggers = $policy.router_decision_contract.conversation_memory_signals
 if ($null -eq $conversationSignalTriggers) {
@@ -1092,6 +1363,7 @@ if ($null -eq $conversationLaneDeclarationTriggers) {
 }
 $projectizationSignals = Get-MatchedTriggers $projectizationTriggers
 $conversationExplicitHits = Get-MatchedTriggers $conversationExplicitTriggers
+$conversationMemoryReadHits = Get-MatchedTriggers $conversationMemoryReadTriggers
 $conversationSignals = Get-MatchedTriggers $conversationSignalTriggers
 $conversationLaneDeclarationHits = Get-MatchedTriggers $conversationLaneDeclarationTriggers
 if ($conversationLaneDeclarationHits.Count -gt 0) {
@@ -1149,7 +1421,7 @@ if ($null -eq $readOnlyAuditTriggers) {
 }
 $activeConversationWriteIntentTriggers = $policy.router_decision_contract.active_conversation_write_intent_triggers
 if ($null -eq $activeConversationWriteIntentTriggers) {
-  $activeConversationWriteIntentTriggers = @("fix", "modify", "change", "write", "record this", "implement")
+  $activeConversationWriteIntentTriggers = @("record this", "update memory", "update conversation memory", "checkpoint this conversation", "记录这个问题", "更新对话记忆")
 }
 $readOnlyAuditHits = Get-MatchedTriggers $readOnlyAuditTriggers
 $activeConversationWriteIntentHits = Get-MatchedTriggers $activeConversationWriteIntentTriggers
@@ -1167,21 +1439,19 @@ $activeConversationWriteIntent = (
 $activeConversationMemoryDurableSignal = (
   $hasActiveConversationMemoryLane -and
   (-not $readOnlyMemoryAuditIntent) -and (
-    $activeConversationWriteIntent -or
-    $conversationFullLaneTriggered -or
-    ($conversationSignals.Count -ge $conversationThreshold) -or
-    ($projectizationSignals.Count -ge $projectizationThreshold) -or
-    ($risk -in @("R4", "R5"))
+    $activeConversationWriteIntent
   ) -and
   (-not $commonErrorWriteIntent) -and
   ($commonErrorHits.Count -eq 0)
 )
 if ($projectLane -eq "PROJECTLESS") {
-  if ($conversationExplicitHits.Count -gt 0) {
+  if (($conversationMemoryReadHits.Count -gt 0) -and $hasActiveConversationMemoryLane) {
+    $conversationMemoryDecision = "read_current_conversation"
+  } elseif ($conversationExplicitHits.Count -gt 0) {
     $conversationMemoryDecision = "create_or_update_current_conversation"
   } elseif ($activeConversationMemoryDurableSignal) {
     $conversationMemoryDecision = "create_or_update_current_conversation"
-  } elseif ((-not $readOnlyMemoryAuditIntent) -and ($projectizationDecision -eq "not_project") -and (($conversationSignals.Count -ge $conversationThreshold) -or $conversationFullLaneTriggered)) {
+  } elseif ((-not $readOnlyMemoryAuditIntent) -and $hasActiveConversationMemoryLane -and (($conversationSignals.Count -ge $conversationThreshold) -or $conversationFullLaneTriggered -or ($projectizationSignals.Count -ge $projectizationThreshold))) {
     $conversationMemoryDecision = "checkpoint_candidate"
   }
 }
@@ -1238,7 +1508,7 @@ if ($commonErrorWriteIntent) {
 } elseif ($explicitLongTermMemoryWriteIntent) {
   $recordIntent = "explicit_user_request"
 } elseif ($conversationMemoryDecision -eq "checkpoint_candidate") {
-  $recordIntent = "conversation_checkpoint"
+  $recordIntent = "conversation_checkpoint_candidate"
 } elseif ($projectizationDecision -eq "emergent_project_candidate") {
   $recordIntent = "projectization_review"
 } elseif ($linkIntent -in @("merge_memories_explicit", "archive_or_seal_memory")) {
@@ -1269,13 +1539,13 @@ if ($commonErrorHits.Count -gt 0) {
   $memoryLane = "current_conversation"
 } elseif ($linkIntent -ne "none") {
   $memoryLane = "referenced_conversation"
+} elseif (($conversationMemoryDecision -ne "none") -and ($hasActiveConversationMemoryLane -or ($conversationExplicitHits.Count -gt 0))) {
+  $memoryLane = "current_conversation"
 } elseif ($explicitLongTermMemoryWriteIntent -and $hasActiveConversationMemoryLane) {
   $memoryLane = "current_conversation"
 } elseif ($explicitLongTermMemoryWriteIntent) {
   $memoryLane = "global_inbox"
 } elseif (($projectLane -eq "PROJECTLESS") -and ($conversationLaneDeclarationHits.Count -gt 0)) {
-  $memoryLane = "current_conversation"
-} elseif (($conversationMemoryDecision -ne "none") -and ($hasActiveConversationMemoryLane -or ($conversationExplicitHits.Count -gt 0))) {
   $memoryLane = "current_conversation"
 } elseif ($selfReflectionRecordHits.Count -gt 0) {
   $memoryLane = "self_reflection_matrix"
@@ -1315,6 +1585,38 @@ if (
   $r3Gates = Get-ObjectPropertyValue $policy.risk_gate_rules "R3"
   foreach ($gate in (ConvertTo-Array $r3Gates)) {
     $requiredGates += [string]$gate
+  }
+}
+
+$appendOnlyCommonErrorException = (
+  ($memoryLane -eq "common_error_corpus") -and
+  ($recordIntent -eq "inferred_reusable_error") -and
+  $commonErrorWriteIntent
+)
+$durableMemoryMutation = (($memoryMode -in @("write", "update")) -and (-not $appendOnlyCommonErrorException))
+if ($durableMemoryMutation) {
+  $risk = "R5"
+  $triggeredRisks += "R5"
+  $existingR5Matches = @()
+  if ($matchedRiskTriggers.Contains("R5")) {
+    $existingR5Matches = @($matchedRiskTriggers["R5"])
+  }
+  $matchedRiskTriggers["R5"] = @($existingR5Matches + "durable_memory_write_or_update" | Select-Object -Unique)
+  $riskCandidates["R5"] = @($matchedRiskTriggers["R5"])
+  $risk_context_decisions["R5"] = [pscustomobject]@{
+    decision = "durable_memory_write_or_update"
+    action_surface = "actionable_R5"
+    promote_to_risk = $true
+    candidate_terms = @("durable_memory_write_or_update")
+    negated_terms = @()
+    diagnostic_terms = @()
+    reason = "non_CE_durable_memory_mutation"
+  }
+  foreach ($gate in (ConvertTo-Array (Get-ObjectPropertyValue $policy.risk_gate_rules "R5"))) {
+    $requiredGates += [string]$gate
+  }
+  foreach ($approvalRule in (ConvertTo-Array (Get-ObjectPropertyValue $policy.risk_approval_rules "R5"))) {
+    $approval += [string]$approvalRule
   }
 }
 
@@ -1405,7 +1707,9 @@ $archiveRequested = Test-TaskContainsAny @("archive", "move to archive", "quaran
 $sectionReplaceRequested = Test-TaskContainsAny @("section replace", "replace section", "replace paragraph", "小节替换", "替换这一段", "替换这段", "段落替换")
 $inPlacePatchRequested = Test-TaskContainsAny @("update", "modify", "fix", "patch", "sync", "adapt", "optimize", "edit", "更新", "修改", "修复", "补丁", "同步", "适配", "优化", "改进")
 
-if ($diskDeleteRequested) {
+if (($readOnlyTask -or ($risk -eq "R1")) -and ($risk -ne "R3")) {
+  $editOperationProfile = "read_only"
+} elseif ($diskDeleteRequested) {
   $editOperationProfile = "delete_from_disk"
 } elseif ($recordDeleteRequested) {
   $editOperationProfile = "delete_record_content"
@@ -1421,8 +1725,6 @@ if ($diskDeleteRequested) {
   $editOperationProfile = "archive_or_move"
 } elseif ($sectionReplaceRequested) {
   $editOperationProfile = "section_replace"
-} elseif (($readOnlyTask -or ($risk -eq "R1")) -and ($risk -ne "R3")) {
-  $editOperationProfile = "read_only"
 } elseif ($inPlacePatchRequested -or ($risk -eq "R3")) {
   $editOperationProfile = "in_place_patch"
 }
@@ -1465,18 +1767,64 @@ $skillOrToolNeed = "none"
 $pluginNeed = "none"
 $preferredCallSurface = "none"
 $toolSurfaceReason = @()
+$correctionLifecycleContract = Get-ObjectPropertyValue $policy.router_decision_contract "correction_lifecycle_contract"
+$interactionSurfaceTriggers = Get-ObjectPropertyValue $correctionLifecycleContract "interaction_surface_triggers"
+$structuredInteractionHits = @()
+$browserInteractionHits = @()
+$desktopInteractionHits = @()
+$keyboardMouseInteractionHits = @()
+if ($null -ne $interactionSurfaceTriggers) {
+  $structuredInteractionHits = Get-MatchedTriggers (Get-ObjectPropertyValue $interactionSurfaceTriggers "structured_tool")
+  $browserInteractionHits = Get-MatchedTriggers (Get-ObjectPropertyValue $interactionSurfaceTriggers "browser")
+  $desktopInteractionHits = Get-MatchedTriggers (Get-ObjectPropertyValue $interactionSurfaceTriggers "desktop_app")
+  $keyboardMouseInteractionHits = Get-MatchedTriggers (Get-ObjectPropertyValue $interactionSurfaceTriggers "keyboard_mouse")
+}
+$interactionCorrectionHits = @($structuredInteractionHits + $browserInteractionHits + $desktopInteractionHits + $keyboardMouseInteractionHits | Select-Object -Unique)
 
 $toolSurfaceGroups = $policy.router_decision_contract.tool_surface_trigger_groups
+$capabilityDiscoveryContract = Get-ObjectPropertyValue $policy.router_decision_contract "capability_discovery_contract"
+$capabilityTriggerGroups = Get-ObjectPropertyValue $capabilityDiscoveryContract "generic_triggers"
 $explicitToolSurfaceHits = Get-TaskMatchedTerms @("@github", "@browser", "@chrome", "@nvidia", "@hugging-face", "@vercel", "@gmail", "@slack", "@canva", "plugin://", "app://", "tool_search", "MCP", "connector", "plugin", "插件", "连接器")
 $githubPluginHits = @()
 $platformPluginHits = @()
 $codexNativeSkillHits = @()
 $browserSurfaceHits = @()
+$capabilityExplicitHits = @()
+$capabilityActionHits = @()
+$capabilityObjectHits = @()
+$capabilityStateHits = @()
 if ($null -ne $toolSurfaceGroups) {
   $githubPluginHits = Get-MatchedTriggers (Get-ObjectPropertyValue $toolSurfaceGroups "github_plugin")
   $platformPluginHits = Get-MatchedTriggers (Get-ObjectPropertyValue $toolSurfaceGroups "platform_plugin")
   $codexNativeSkillHits = Get-MatchedTriggers (Get-ObjectPropertyValue $toolSurfaceGroups "codex_native_skill")
   $browserSurfaceHits = Get-MatchedTriggers (Get-ObjectPropertyValue $toolSurfaceGroups "browser_surface")
+}
+if ($null -ne $capabilityTriggerGroups) {
+  $capabilityExplicitHits = Get-CapabilityMatchedTerms (Get-ObjectPropertyValue $capabilityTriggerGroups "explicit_surface")
+  $capabilityActionHits = Get-CapabilityMatchedTerms (Get-ObjectPropertyValue $capabilityTriggerGroups "action")
+  $capabilityObjectHits = Get-CapabilityMatchedTerms (Get-ObjectPropertyValue $capabilityTriggerGroups "object")
+  $capabilityStateHits = Get-CapabilityMatchedTerms (Get-ObjectPropertyValue $capabilityTriggerGroups "state")
+}
+
+$genericCapabilityIntent = (
+  ([bool](Get-ObjectPropertyValue $capabilityDiscoveryContract "enabled")) -and
+  (
+    ($capabilityExplicitHits.Count -gt 0) -or
+    (($capabilityActionHits.Count -gt 0) -and ($capabilityObjectHits.Count -gt 0)) -or
+    (($capabilityStateHits.Count -gt 0) -and ($capabilityObjectHits.Count -gt 0))
+  )
+)
+if ($genericCapabilityIntent) {
+  $toolSurfaceNeed = "multiple"
+  $toolDiscoveryStatus = "not_checked"
+  $skillOrToolNeed = "registered_capability"
+  $pluginNeed = "candidate_discovery_required"
+  $preferredCallSurface = "capability_router"
+  $toolSurfaceReason += "semantic_capability_discovery_required"
+  if ($skillLifecycleProfile -in @("none", "listing_only")) {
+    $skillLifecycleProfile = "active_frame_required"
+  }
+  $requiredSkills += "capability-router"
 }
 
 if (($explicitToolSurfaceHits.Count -gt 0) -or ($githubPluginHits.Count -gt 0) -or ($platformPluginHits.Count -gt 0)) {
@@ -1526,6 +1874,26 @@ if ($targetSurface -eq "tool_call" -and $toolSurfaceNeed -eq "none") {
   $toolSurfaceReason += "local_tool_or_shell_surface"
 }
 
+if ($keyboardMouseInteractionHits.Count -gt 0) {
+  $toolSurfaceNeed = "keyboard_mouse"
+  $toolDiscoveryStatus = "not_checked"
+  $skillOrToolNeed = "desktop_or_keyboard_mouse_control"
+  $preferredCallSurface = "keyboard_mouse"
+  $toolSurfaceReason += "keyboard_mouse_candidate_requires_focus_binding"
+} elseif ($desktopInteractionHits.Count -gt 0 -and $toolSurfaceNeed -in @("none", "shell")) {
+  $toolSurfaceNeed = "desktop_app"
+  $toolDiscoveryStatus = "not_checked"
+  $skillOrToolNeed = "desktop_control"
+  $preferredCallSurface = "desktop_or_computer_use"
+  $toolSurfaceReason += "desktop_app_candidate"
+} elseif ($structuredInteractionHits.Count -gt 0 -and $toolSurfaceNeed -eq "none") {
+  $toolSurfaceNeed = "plugin_mcp"
+  $toolDiscoveryStatus = "not_checked"
+  $skillOrToolNeed = "mcp_or_app_tool"
+  $preferredCallSurface = "plugin_or_connector"
+  $toolSurfaceReason += "structured_tool_candidate"
+}
+
 if ($toolDiscoveryStatus -in @("not_checked", "user_named")) {
   $requiredGates += "tool_surface_discovery_gate"
 }
@@ -1533,7 +1901,7 @@ $toolSurfaceReason = @($toolSurfaceReason | Select-Object -Unique)
 $correctionLifecycleProfile = "none"
 if ($feedbackLoopProfile -in @("prevention_review", "explicit_cycle")) {
   $correctionLifecycleProfile = "memory_to_action"
-} elseif ($toolSurfaceNeed -ne "none") {
+} elseif ($interactionCorrectionHits.Count -gt 0) {
   $correctionLifecycleProfile = "surface_preflight"
 }
 
@@ -1606,8 +1974,19 @@ if ($engineeringExecutionProfiles.Count -gt 0) { $moduleNeed += "engineering_exe
 if ($moduleNeed.Count -eq 0) { $moduleNeed += "none" }
 $moduleNeed = @($moduleNeed | Select-Object -Unique)
 
-$humanConfirmationNeed = (@($approval | Select-Object -Unique).Count -gt 0)
+$actionBindingContract = Get-ObjectPropertyValue $policy.router_decision_contract "action_binding_contract"
+$softTargetPredictionReviews = 3
+$softTargetNextActions = 8
+if ($null -ne $actionBindingContract) {
+  $configuredPredictionBudget = Get-ObjectPropertyValue $actionBindingContract "soft_target_prediction_reviews"
+  $configuredNextActionLimit = Get-ObjectPropertyValue $actionBindingContract "soft_target_next_actions"
+  if ($null -ne $configuredPredictionBudget) { $softTargetPredictionReviews = [int]$configuredPredictionBudget }
+  if ($null -ne $configuredNextActionLimit) { $softTargetNextActions = [int]$configuredNextActionLimit }
+}
+
+$predictionReviewProfile = "none"
 $actionBindings = @()
+$humanConfirmationNeed = (@($approval | Select-Object -Unique).Count -gt 0)
 if ($humanConfirmationNeed) {
   $r5ConfirmationDecision = if ($risk_context_decisions.Contains("R5")) { $risk_context_decisions["R5"] } else { $null }
   $confirmationTargets = @()
@@ -1633,41 +2012,36 @@ if ($humanConfirmationNeed) {
     confirmation_request = $confirmationRequest
   }
 }
-if ($memoryNeed -ne "none") {
-  $actionBindings += [pscustomobject]@{
-    action = "retrieve_matching_memory"
-    completion_evidence = "selected_record_id_and_provenance"
-  }
+$currentConversationNavigationOnly = (
+  $hasActiveConversationMemoryLane -and
+  ($memoryMode -eq "read") -and
+  ($memoryLane -eq "current_conversation") -and
+  (($targetSurface -eq "conversation_ledger") -or ($conversationMemoryDecision -eq "read_current_conversation"))
+)
+if (($memoryNeed -ne "none") -and (-not $currentConversationNavigationOnly)) {
+  $actionBindings += [pscustomobject]@{ action = "retrieve_matching_memory"; completion_evidence = "selected_record_id" }
 }
 if ($hasResolvedReferencedConversation) {
-  $actionBindings += [pscustomobject]@{
-    action = "resolve_conversation_link"
-    completion_evidence = "resolved_readonly_navigation_bundle"
-  }
+  $actionBindings += [pscustomobject]@{ action = "resolve_conversation_link"; completion_evidence = "resolved_readonly_navigation_bundle" }
+}
+if ($currentConversationNavigationOnly) {
+  $actionBindings += [pscustomobject]@{ action = "resolve_conversation_link"; completion_evidence = "resolved_current_conversation_navigation_bundle" }
+}
+if ($feedbackLoopProfile -in @("prevention_review", "explicit_cycle")) {
+  $predictionReviewProfile = "task_local_memory_prediction"
+  $actionBindings += [pscustomobject]@{ action = "prepare_task_local_prediction_review"; completion_evidence = "task_local_prediction_review" }
 }
 if ($correctionLifecycleProfile -ne "none") {
-  $actionBindings += [pscustomobject]@{
-    action = "prepare_task_local_correction_bundle"
-    completion_evidence = "task_local_correction_bundle"
-  }
+  $actionBindings += [pscustomobject]@{ action = "prepare_task_local_correction_bundle"; completion_evidence = "task_local_correction_bundle" }
+}
+if ($feedbackLoopProfile -eq "explicit_cycle") {
+  $actionBindings += [pscustomobject]@{ action = "verify_and_calibrate_feedback"; completion_evidence = "verified_postcondition_or_calibration" }
 }
 if (($externalNeed.Count -gt 0) -and ($externalNeed[0] -ne "none")) {
-  $actionBindings += [pscustomobject]@{
-    action = "perform_external_research_route"
-    completion_evidence = "source_ledger_or_citations"
-  }
-}
-if ($null -ne $directOutcomeFirstInstruction) {
-  $actionBindings += [pscustomobject]@{
-    action = "direct_outcome_first"
-    completion_evidence = "direct_surface_mutation_or_declared_expansion_evidence"
-  }
+  $actionBindings += [pscustomobject]@{ action = "perform_external_research_route"; completion_evidence = "source_ledger_or_citations" }
 }
 if ($taskContinuityArmed) {
-  $actionBindings += [pscustomobject]@{
-    action = "prepare_task_continuity_capsule"
-    completion_evidence = "task_continuity_capsule_or_dormant_receipt"
-  }
+  $actionBindings += [pscustomobject]@{ action = "prepare_task_continuity_capsule"; completion_evidence = "task_continuity_capsule_or_dormant_receipt" }
 }
 if ($engineeringExecutionProfiles.Count -gt 0) {
   $actionBindings += [pscustomobject]@{
@@ -1676,43 +2050,75 @@ if ($engineeringExecutionProfiles.Count -gt 0) {
     profiles = @($engineeringExecutionProfiles)
   }
 }
-$actionBindingIds = @($actionBindings | ForEach-Object { [string]$_.action } | Select-Object -Unique)
+if ($toolDiscoveryStatus -in @("not_checked", "user_named")) {
+  $actionBindings += [pscustomobject]@{ action = "discover_preferred_tool_surface"; completion_evidence = "checked_runtime_capability_status" }
+}
+if ($skillLifecycleProfile -eq "active_frame_required") {
+  $actionBindings += [pscustomobject]@{ action = "activate_skill_frame"; completion_evidence = "skill_active_frame" }
+} elseif ($skillLifecycleProfile -eq "release_receipt_required") {
+  $actionBindings += [pscustomobject]@{ action = "release_skill_frame"; completion_evidence = "skill_release_receipt" }
+} elseif ($skillLifecycleProfile -eq "reactivate_from_receipt") {
+  $actionBindings += [pscustomobject]@{ action = "reactivate_skill_from_receipt"; completion_evidence = "skill_resume_receipt" }
+}
+if ($memoryMode -in @("write", "update")) {
+  $actionBindings += [pscustomobject]@{ action = "write_selected_memory_lane"; completion_evidence = "written_record_or_artifact_path" }
+}
+if ($linkIntent -ne "none") {
+  $actionBindings += [pscustomobject]@{ action = "resolve_conversation_link"; completion_evidence = "resolved_link_decision" }
+}
+if ($claimRisk -ne "none") {
+  $actionBindings += [pscustomobject]@{ action = "bind_claim_evidence_boundary"; completion_evidence = "claim_schema_or_bounded_wording" }
+}
+if ($projectizationDecision -eq "emergent_project_candidate") {
+  $actionBindings += [pscustomobject]@{ action = "review_projectization_boundary"; completion_evidence = "project_lane_decision" }
+}
+if ($editOperationProfile -notin @("none", "read_only")) {
+  $actionBindings += [pscustomobject]@{ action = "apply_edit_operation_profile"; completion_evidence = "targeted_diff_or_artifact" }
+}
+if ($projectLane -ne "PROJECTLESS") {
+  $actionBindings += [pscustomobject]@{ action = "load_project_context"; completion_evidence = "project_rules_loaded" }
+}
+if ($staticKnowledgeHits.Count -gt 0) {
+  $actionBindings += [pscustomobject]@{ action = "retrieve_static_knowledge_index"; completion_evidence = "selected_static_manual_page" }
+}
+if (
+  ($readDepthProfile -ne "none") -and
+  (-not $currentConversationNavigationOnly) -and
+  (($risk -ne "R0") -or ($memoryNeed -ne "none") -or ($targetSurface -ne "current_chat"))
+) {
+  $actionBindings += [pscustomobject]@{ action = "apply_read_depth_profile"; completion_evidence = "selected_read_window_or_index" }
+}
+if ($firstPrinciplesProfile -ne "none") {
+  $actionBindings += [pscustomobject]@{ action = "apply_first_principles_profile"; completion_evidence = "constraints_alternatives_and_verifier" }
+}
+if ($skillAuditProfile -ne "none") {
+  $actionBindings += [pscustomobject]@{ action = "perform_skill_audit_profile"; completion_evidence = "skill_audit_findings" }
+}
+if ($debtHygieneHits.Count -gt 0) {
+  $actionBindings += [pscustomobject]@{ action = "classify_debt_hygiene"; completion_evidence = "classified_debt_set" }
+}
 
-$memorySourceHints = @()
-if (($memoryNeed -ne "none") -and $hasResolvedReferencedConversation) {
-  $referencedEntry = $referencedConversationRegistryMatch.entry
-  $memorySourceHints += [pscustomobject]@{
-    lane = "referenced_conversation"
-    memory_id = [string](Get-ObjectPropertyValue $referencedEntry "memory_id")
-    root_path = [string](Get-ObjectPropertyValue $referencedEntry "root_path")
-    meta_path = [string](Get-ObjectPropertyValue $referencedEntry "meta_path")
-    ledger_root_path = [string](Get-ObjectPropertyValue $referencedEntry "ledger_root_path")
-    ledger_index_path = [string](Get-ObjectPropertyValue $referencedEntry "ledger_index_path")
-    registry_path = [string]$referencedConversationRegistryMatch.registry_path
-    navigation_profile = "meta_state_links_ledger_one_hop"
-    isolation = "unique_active_registry_match_link_only_read"
+$dedupedActionBindings = @()
+$seenActionBindings = @{}
+foreach ($binding in $actionBindings) {
+  $bindingId = [string]$binding.action
+  if (-not $seenActionBindings.ContainsKey($bindingId)) {
+    $seenActionBindings[$bindingId] = $true
+    $dedupedActionBindings += $binding
   }
 }
-if (($memoryNeed -ne "none") -and $hasActiveConversationMemoryLane) {
-  $memorySourceHints += [pscustomobject]@{
-    lane = "current_conversation"
-    root_path = $activeConversationMemoryLanePath
-    meta_path = (Join-Path $activeConversationMemoryLanePath "_META_INDEX.md")
-    isolation = "exact_active_conversation_lane"
-  }
+$actionBindingOverflowCount = 0
+if ($dedupedActionBindings.Count -gt $softTargetNextActions) {
+  $actionBindingOverflowCount = $dedupedActionBindings.Count - $softTargetNextActions
 }
-if (($memoryNeed -ne "none") -and ($projectLane -ne "PROJECTLESS")) {
-  $projectMemoryRoots = ConvertTo-Array (Get-ObjectPropertyValue $policy.memory_roots $projectLane)
-  foreach ($root in $projectMemoryRoots) {
-    if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
-      $memorySourceHints += [pscustomobject]@{
-        lane = "current_project"
-        root_path = [string]$root
-        meta_path = (Join-Path ([string]$root) "_META_INDEX.md")
-        isolation = "registered_project_lane_root"
-      }
-    }
-  }
+$actionBindingOverSoftTarget = ($actionBindingOverflowCount -gt 0)
+$actionBindings = @($dedupedActionBindings)
+$actionBindingIds = @($actionBindings | ForEach-Object { [string]$_.action })
+$actionBindingProfile = "none"
+if ($predictionReviewProfile -ne "none") {
+  $actionBindingProfile = "retrieval_to_action"
+} elseif ($actionBindings.Count -gt 0) {
+  $actionBindingProfile = "route_to_action"
 }
 
 $debugTriggers = Get-ObjectPropertyValue $policy.receipt_profiles "debug_triggers"
@@ -1755,6 +2161,66 @@ $profileReason = @($profileReason | Select-Object -Unique)
 $routingStatus = "classified"
 $executionDisposition = if ($humanConfirmationNeed) { "pending_user_confirmation" } else { "advisory_route_ready" }
 
+$memorySourceHints = @()
+if (($memoryNeed -ne "none") -and $hasResolvedReferencedConversation) {
+  $referencedEntry = $referencedConversationRegistryMatch.entry
+  $memorySourceHints += [pscustomobject]@{
+    lane = "referenced_conversation"
+    memory_id = [string](Get-ObjectPropertyValue $referencedEntry "memory_id")
+    root_path = [string](Get-ObjectPropertyValue $referencedEntry "root_path")
+    meta_path = [string](Get-ObjectPropertyValue $referencedEntry "meta_path")
+    ledger_root_path = [string](Get-ObjectPropertyValue $referencedEntry "ledger_root_path")
+    ledger_index_path = [string](Get-ObjectPropertyValue $referencedEntry "ledger_index_path")
+    registry_path = [string]$referencedConversationRegistryMatch.registry_path
+    navigation_profile = "meta_state_links_ledger_one_hop"
+    isolation = "unique_active_registry_match_link_only_read"
+  }
+}
+if (($memoryNeed -ne "none") -and $hasActiveConversationMemoryLane) {
+  $activeConversationMemoryId = ""
+  $activeConversationLedgerRootPath = ""
+  $activeConversationLedgerIndexPath = ""
+  $activeConversationIndexPath = Join-Path $activeConversationMemoryLanePath "index.json"
+  if (Test-Path -LiteralPath $activeConversationIndexPath -PathType Leaf) {
+    try {
+      $activeConversationIndex = Get-Content -LiteralPath $activeConversationIndexPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      $activeConversationMemoryId = [string](Get-ObjectPropertyValue $activeConversationIndex "memory_id")
+      $activeConversationLedger = Get-ObjectPropertyValue $activeConversationIndex "conversation_ledger"
+      if ($null -ne $activeConversationLedger) {
+        $activeConversationLedgerRootPath = [string](Get-ObjectPropertyValue $activeConversationLedger "path")
+      }
+    } catch {
+      $activeConversationMemoryId = ""
+      $activeConversationLedgerRootPath = ""
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($activeConversationLedgerRootPath)) {
+    $activeConversationLedgerIndexPath = Join-Path $activeConversationLedgerRootPath "_LEDGER_INDEX.md"
+  }
+  $memorySourceHints += [pscustomobject]@{
+    lane = "current_conversation"
+    memory_id = $activeConversationMemoryId
+    root_path = $activeConversationMemoryLanePath
+    meta_path = (Join-Path $activeConversationMemoryLanePath "_META_INDEX.md")
+    ledger_root_path = $activeConversationLedgerRootPath
+    ledger_index_path = $activeConversationLedgerIndexPath
+    navigation_profile = "meta_state_links_ledger_one_hop"
+    isolation = "exact_workspace_and_optional_thread_match"
+  }
+}
+if (($memoryNeed -ne "none") -and ($memoryLane -eq "current_project")) {
+  foreach ($root in $projectMemoryRoots) {
+    $memorySourceHints += [pscustomobject]@{
+      lane = "current_project"
+      root_path = [string]$root
+      meta_path = (Join-Path ([string]$root) "_META_INDEX.md")
+      isolation = "registered_project_lane_root"
+    }
+  }
+}
+
+$externalRetrievalContractReceipt = if ($needsExternalResearch) { $externalRetrievalContract } else { $null }
+
 $routingReceipt = [ordered]@{
   task_type = $risk
   routing_status = $routingStatus
@@ -1775,7 +2241,15 @@ $routingReceipt = [ordered]@{
   skill_audit_profile = $skillAuditProfile
   skill_audit_signals = @($skillAuditSignals)
   feedback_loop_profile = $feedbackLoopProfile
+  action_binding_profile = $actionBindingProfile
+  prediction_review_profile = $predictionReviewProfile
+  prediction_review_budget = $softTargetPredictionReviews
+  prediction_review_budget_kind = "soft_target"
   correction_lifecycle_profile = $correctionLifecycleProfile
+  coverage_expansion_allowed = $true
+  action_bindings = @($actionBindings)
+  action_binding_overflow_count = $actionBindingOverflowCount
+  action_binding_over_soft_target = [bool]$actionBindingOverSoftTarget
   first_principles_profile = $firstPrinciplesProfile
   first_principles_signals = @($firstPrinciplesSignals)
   read_semantic_boundary = @($readSemanticBoundary)
@@ -1789,10 +2263,11 @@ $routingReceipt = [ordered]@{
   memory_write_profile = $memoryWriteProfile
   memory_lane = $memoryLane
   memory_source_hints = @($memorySourceHints)
-  action_bindings = @($actionBindings)
-  direct_outcome_first_instruction = $directOutcomeFirstInstruction
   record_intent = $recordIntent
   external_need = @($externalNeed)
+  external_retrieval_profile = $externalRetrievalProfile
+  external_exact_anchor_signal = [bool]$hasExactExternalAnchor
+  external_retrieval_contract = $externalRetrievalContractReceipt
   claim_risk = $claimRisk
   projectization_decision = $projectizationDecision
   conversation_memory_decision = $conversationMemoryDecision
@@ -1819,26 +2294,34 @@ $compactReceipt = [ordered]@{
   skill_lifecycle_profile = $skillLifecycleProfile
   skill_audit_profile = $skillAuditProfile
   feedback_loop_profile = $feedbackLoopProfile
+  action_binding_profile = $actionBindingProfile
+  prediction_review_profile = $predictionReviewProfile
+  prediction_review_budget = $softTargetPredictionReviews
+  prediction_review_budget_kind = "soft_target"
   correction_lifecycle_profile = $correctionLifecycleProfile
+  coverage_expansion_allowed = $true
+  action_binding_ids = @($actionBindingIds)
+  action_bindings = @($actionBindings)
+  action_binding_overflow_count = $actionBindingOverflowCount
+  action_binding_over_soft_target = [bool]$actionBindingOverSoftTarget
   first_principles_profile = $firstPrinciplesProfile
   read_semantic_boundary = @($readSemanticBoundary)
   read_depth_profile = $readDepthProfile
   edit_operation_profile = $editOperationProfile
   task_continuity_decision = $taskContinuityDecision
   engineering_execution_profiles = @($engineeringExecutionProfiles)
+  memory_need = $memoryNeed
   memory_mode = $memoryMode
   hybrid_retrieval_profile = $hybridRetrievalProfile
   memory_write_profile = $memoryWriteProfile
   memory_lane = $memoryLane
   memory_source_hints = @($memorySourceHints)
-  action_binding_ids = @($actionBindingIds)
-  action_bindings = @($actionBindings)
-  direct_outcome_first_instruction = $directOutcomeFirstInstruction
-  memory_need = $memoryNeed
   conversation_memory_decision = $conversationMemoryDecision
   conversation_full_lane_triggered = [bool]$conversationFullLaneTriggered
   link_intent = $linkIntent
   external_need = @($externalNeed)
+  external_retrieval_profile = $externalRetrievalProfile
+  external_exact_anchor_signal = [bool]$hasExactExternalAnchor
   claim_risk = $claimRisk
   human_confirmation_need = $humanConfirmationNeed
   target_surface = $targetSurface
@@ -1875,7 +2358,16 @@ $result = [ordered]@{
   skill_audit_profile = $skillAuditProfile
   skill_audit_signals = @($skillAuditSignals)
   feedback_loop_profile = $feedbackLoopProfile
+  action_binding_profile = $actionBindingProfile
+  prediction_review_profile = $predictionReviewProfile
+  prediction_review_budget = $softTargetPredictionReviews
+  prediction_review_budget_kind = "soft_target"
   correction_lifecycle_profile = $correctionLifecycleProfile
+  coverage_expansion_allowed = $true
+  action_bindings = @($actionBindings)
+  action_binding_ids = @($actionBindingIds)
+  action_binding_overflow_count = $actionBindingOverflowCount
+  action_binding_over_soft_target = [bool]$actionBindingOverSoftTarget
   first_principles_profile = $firstPrinciplesProfile
   first_principles_signals = @($firstPrinciplesSignals)
   read_semantic_boundary = @($readSemanticBoundary)
@@ -1889,11 +2381,11 @@ $result = [ordered]@{
   memory_write_profile = $memoryWriteProfile
   memory_lane = $memoryLane
   memory_source_hints = @($memorySourceHints)
-  action_bindings = @($actionBindings)
-  action_binding_ids = @($actionBindingIds)
-  direct_outcome_first_instruction = $directOutcomeFirstInstruction
   record_intent = $recordIntent
   external_need = @($externalNeed)
+  external_retrieval_profile = $externalRetrievalProfile
+  external_exact_anchor_signal = [bool]$hasExactExternalAnchor
+  external_retrieval_contract = $externalRetrievalContractReceipt
   claim_risk = $claimRisk
   projectization_decision = $projectizationDecision
   conversation_memory_decision = $conversationMemoryDecision

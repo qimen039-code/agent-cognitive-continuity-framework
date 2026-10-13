@@ -1,6 +1,6 @@
 ---
 name: shared-semantic-anchors
-description: Empty template for user-confirmed semantic anchors. Use only when a user explicitly defines or corrects a reusable meaning, boundary, naming rule, or interpretation shortcut.
+description: Use when a user explicitly defines or corrects reusable project terminology. Store confirmed meaning and boundaries in the adopting workspace, with authorization for durable writes.
 ---
 
 # Shared Semantic Anchors

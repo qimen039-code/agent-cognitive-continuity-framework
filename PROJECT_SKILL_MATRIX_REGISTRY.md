@@ -2,63 +2,35 @@
 
 A compact index that routes the agent to project-specific skill matrix routers. Keep this file small; put detailed behavior inside each project router skill.
 
-## Default Flow
+## Select the task-relevant entry
 
-```text
-root AGENTS.md
--> embedded harness intake router
--> mandatory model-layer pre-action control plane
--> this registry
--> project router or project AGENTS
--> memory meta summary, category index, and matching capsule only when needed
--> executable gates only when needed
-```
+Use the user's goal, actual object, next action and side effects to select a
+skill. An exposed action-specific tool is the default; the retained intake
+router can produce an advisory receipt when a caller needs that interface.
+It is not an obligatory first step for ordinary requests.
 
-## Mandatory Memory Retrieval Chain
+| Need | Entry |
+| --- | --- |
+| Repeated scoped text/code reading | `skills/text-source-reader/SKILL.md` |
+| A concrete missing tool or named capability | `skills/capability-router/SKILL.md` |
+| ACCF maintenance or a selected incident | `skills/troubleshooting-skill-matrix/SKILL.md` |
+| Authorized reusable error/solution recording | `skills/agent-error-memory/SKILL.md`, `skills/bug-solution-memory/SKILL.md` |
+| User-defined project terminology | `skills/shared-semantic-anchors/SKILL.md` |
 
-Memory lookup must follow this order:
+Read only the selected skill and necessary references. Use relevant native
+recall or an exact valid source first; expand a lane's meta/category/payload
+navigation only when discovery, precision or a conflict requires it. Summaries
+remain locators, and actual original content supports conclusions.
 
-```text
-meta summary / _META_INDEX / router manifest
--> category index / point index / outer_retrieval_surface
--> matching capsule or paired point payload
-```
+Existing task-scoped authorization survives routing, skill activation and
+phase changes. The host owns permission and execution. Risk levels and legacy
+receipt fields do not create a new approval requirement or authorize actions.
+New external effects or irreversible operations need the appropriate scope.
 
-Do not open deep memory files, all project notes, or all incident payloads before the meta/index layer has routed the request. If a project is still flat, treat its top-level index as the temporary meta layer and record that the project memory layout should be upgraded.
-
-## Mandatory Model-Layer Pre-Action Control Plane
-
-Nontrivial tasks must run the control plane before loading project-specific context, during execution when trigger events appear, and before final output. It should not wrap every tool call by default.
-
-Protected high-risk actions are different from ordinary tool calls: once the
-route identifies one, the model must stop before forming or calling the
-executable action until exact human authorization exists. Authorization is
-one-event, one-scope, and one-use; a later or materially changed risky action
-requires a fresh stop. This model-layer stop remains mandatory even when the
-host has no independent deny-capable tool hook.
-
-Required decisions:
-
-- task type and active lane;
-- current risk level and escalation triggers;
-- whether project instructions, a project router, memory retrieval, existing skills/tools/plugins, external research, claim gates, or human confirmation are needed.
-
-The control plane should compute routing internally on every nontrivial task. R0-R5 labels stay silent by default; expose a compact runtime receipt only when the decision changes execution path, cost, permission, memory, external search, or claim boundary.
-Full fields are task type, target surface, audience, project lane, risk level, semantic ambiguity, module need, memory need, memory mode, memory lane, record intent, external need, claim risk, projectization decision, receipt profile, and required gates.
-
-Receipt profiles: `compact_runtime` for ordinary local execution and single-agent adapters; `extended_governance` for public docs, local harness, adapter, project memory, semantic ambiguity, memory write, or projectization boundary work; `debug_receipt` for router diagnosis and full receipt debugging.
-
-Runtime trigger events include new evidence, missing files, tool errors, scope changes, user corrections, cross-project terminology, currentness/version claims, GitHub/open-source mechanism intake, cost escalation, risk escalation, strong claims, R5 actions, and memory writes.
-
-Use the cheapest sufficient route. Do not load all project memory, all skills, all history, or wrap every tool call just because this governance layer is active.
-
-Memory recording is routed separately from memory reading. Explicit "record this error" requests go to the self-reflection matrix or common error corpus; small reusable mistakes go to common error-and-solution records first; full ERR/SOL pairs are for high-impact, repeated, or explicit incidents.
-
-Reusable memory capsules use source-monitoring fields: `source_tag` `belief_status` `confidence` `derived_from` `source_monitoring` `belief_trace_summary`. Treat optional numeric scores as adapter metadata, not as a replacement for evidence basis and provenance.
-
-Governance-layer updates, dynamic-evaluation rule changes, routing-rule changes, trigger-term updates, decision-matrix edits, and framework behavior changes are `R3` even when they are documentation-only. A missed route should be fixed with the narrowest reusable trigger term rather than a broad catch-all.
-
-Trigger terms should be promoted only when they represent a durable routing class: recurring, cross-task, boundary-changing, and not already covered by an existing generic edit/report/search/memory rule. One-off wording for a single documentation request should stay in the task receipt or changelog, not in the long-lived policy.
+Errors are fixed and verified in the current task before any authorized durable
+recording. A record does not become a rule automatically; historical or
+superseded material remains diagnostic. Avoid a new keyword rule for each new
+phrase when model judgment and existing action-specific tools are sufficient.
 
 ## Nonblocking Behavior Correction Layer
 

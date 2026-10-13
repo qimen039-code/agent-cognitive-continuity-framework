@@ -31,6 +31,16 @@ MAX_SOURCE_REFS = 4
 DEFAULT_GLOBAL_CHARS = 3_200
 DEFAULT_DYNAMIC_CHARS = 1_200
 
+_READER_SURFACE_PATTERNS = (
+    ("commit", re.compile(r"(?i)(\bcommit\b|提交说明|提交信息|提交标题)")),
+    ("pull_request", re.compile(r"(?i)(pull request|\bPR\b|合并请求|拉取请求)")),
+    ("release", re.compile(r"(?i)(\brelease\b|release notes?|发布说明|版本说明)")),
+    ("readme", re.compile(r"(?i)(\bREADME\b|项目说明)")),
+    ("ui_copy", re.compile(r"(?i)(UI copy|user-facing copy|界面文案|用户可见文案)")),
+    ("title", re.compile(r"(?i)(\btitle\b|\bheading\b|标题|开篇|标签|文件名|注释|字幕)")),
+    ("handoff", re.compile(r"(?i)(\bhandoff\b|final answer|final delivery|交付说明|交付总结|最终答复|最终交付)")),
+)
+
 _REF_KEYS = (
     "ref_id",
     "record_id",
@@ -122,13 +132,23 @@ def _relation(capsule: Mapping[str, Any]) -> dict[str, Any]:
     output_ids = [str(value) for value in action.get("serves_output_ids") or []]
     criterion_ids = [str(value) for value in action.get("serves_criterion_ids") or []]
     action_text = _bounded_text(action.get("text"), 800)
-    if output_ids or criterion_ids:
-        status = "explicit_binding"
+    binding_source = _bounded_text(action.get("binding_source"), 80) or None
+    state_progress_allowed = action.get("state_progress_allowed") is True
+    if binding_source == "unbound":
+        status = "unbound"
+    elif binding_source == "explicit_event_unresolved":
+        status = "unresolved_binding"
+    elif output_ids or criterion_ids:
+        status = (
+            "explicit_binding"
+            if binding_source in {None, "explicit_event"}
+            else "fallback_binding"
+        )
     elif action_text:
         status = "fallback_objective"
     else:
         status = "unresolved"
-    return {
+    relation = {
         "status": status,
         "specificity": (
             "host_kind_only"
@@ -139,6 +159,137 @@ def _relation(capsule: Mapping[str, Any]) -> dict[str, Any]:
         "serves_criterion_ids": criterion_ids[:12],
         "reason": _bounded_text(action.get("reason"), 320) or None,
     }
+    if binding_source is not None:
+        relation["binding_source"] = binding_source
+    if binding_source == "unbound" or "state_progress_allowed" in action:
+        relation["state_progress_allowed"] = state_progress_allowed
+    unresolved_binding_ids = [
+        str(value) for value in action.get("unresolved_binding_ids") or []
+    ][:12]
+    if unresolved_binding_ids:
+        relation["unresolved_binding_ids"] = unresolved_binding_ids
+    return relation
+
+
+def _correction_present(capsule: Mapping[str, Any]) -> bool:
+    goal_deltas = capsule.get("goal_deltas")
+    if isinstance(goal_deltas, Sequence) and not isinstance(goal_deltas, (str, bytes)):
+        if any(
+            isinstance(item, Mapping) and item.get("kind") == "correction"
+            for item in goal_deltas
+        ):
+            return True
+    for key in ("last_user_delta", "active_local_delta"):
+        value = capsule.get(key)
+        if isinstance(value, Mapping) and value.get("kind") == "correction":
+            return True
+    return False
+
+
+def _reader_surface(capsule: Mapping[str, Any]) -> str | None:
+    anchor = (
+        capsule.get("global_goal_anchor")
+        if isinstance(capsule.get("global_goal_anchor"), Mapping)
+        else {}
+    )
+    values: list[Any] = [
+        anchor.get("objective") or capsule.get("objective"),
+        anchor.get("purpose") or capsule.get("purpose"),
+        anchor.get("stop_condition") or capsule.get("stop_condition"),
+        capsule.get("current_step"),
+        capsule.get("next_action"),
+    ]
+    action = capsule.get("current_action")
+    if isinstance(action, Mapping):
+        values.append(action.get("text"))
+    outputs = anchor.get("required_outputs") or capsule.get("required_outputs") or []
+    if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)):
+        values.extend(
+            item.get("text")
+            for item in outputs
+            if isinstance(item, Mapping)
+        )
+    haystack = " ".join(_bounded_text(value, 1_000) for value in values if value)
+    for surface, pattern in _READER_SURFACE_PATTERNS:
+        if pattern.search(haystack):
+            return surface
+    return None
+
+
+def classify_finalization_review_need(
+    capsule: Mapping[str, Any], *, finalization_event: bool = False
+) -> dict[str, Any]:
+    """Classify a capability-neutral review of corrected final surfaces."""
+
+    correction = _correction_present(capsule)
+    if not correction:
+        return {
+            "status": "not_needed",
+            "surface": None,
+            "capability_query": None,
+            "reason_codes": ["correction_absent"],
+        }
+    if finalization_event:
+        return {
+            "status": "required",
+            "surface": "final_handoff",
+            "capability_query": "review corrected reader-facing final surfaces",
+            "reason_codes": ["correction_present", "finalization_event"],
+        }
+    surface = _reader_surface(capsule)
+    if surface is None:
+        return {
+            "status": "not_needed",
+            "surface": None,
+            "capability_query": None,
+            "reason_codes": [
+                "correction_present",
+                "reader_facing_surface_absent",
+            ],
+        }
+    return {
+        "status": "required",
+        "surface": surface,
+        "capability_query": "review corrected reader-facing final surfaces",
+        "reason_codes": ["correction_present", "reader_facing_surface"],
+    }
+
+
+def classify_execution_attention(capsule: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Project the smallest useful check before the first substantive action."""
+
+    if int(capsule.get("progress_revision") or 0) != 1:
+        return []
+    if isinstance(capsule.get("current_action"), Mapping):
+        return []
+    reasons = {str(value) for value in capsule.get("activation_reasons") or []}
+    if "write_intent" in reasons:
+        return [
+            {
+                "trigger": "write_preflight_review_required",
+                "timing": "before_first_action",
+                "reason_codes": ["write_intent", "action_unbound"],
+                "required_checks": [
+                    "exact_target_and_environment",
+                    "write_method_format_and_encoding",
+                    "minimal_change_boundary",
+                    "post_write_verifier",
+                ],
+            }
+        ]
+    if "tool_required" in reasons:
+        return [
+            {
+                "trigger": "action_alignment_review_required",
+                "timing": "before_first_action",
+                "reason_codes": ["tool_required", "action_unbound"],
+                "required_checks": [
+                    "required_output_or_acceptance_binding",
+                    "semantic_postcondition",
+                ],
+            }
+        ]
+    return []
 
 
 def _global_payload(capsule: Mapping[str, Any]) -> dict[str, Any]:
@@ -164,7 +315,7 @@ def _global_payload(capsule: Mapping[str, Any]) -> dict[str, Any]:
         if _bounded_text(value, 800)
     ][:12]
     action = capsule.get("current_action")
-    return {
+    payload = {
         "global": {
             "objective": _bounded_text(anchor.get("objective") or capsule.get("objective"), 4_000),
             "purpose": _bounded_text(anchor.get("purpose") or capsule.get("purpose"), 1_000) or None,
@@ -195,6 +346,13 @@ def _global_payload(capsule: Mapping[str, Any]) -> dict[str, Any]:
             "workspace_review_required": bool(capsule.get("workspace_review_required")),
         },
     }
+    attention = classify_execution_attention(capsule)
+    if attention:
+        payload["execution_attention"] = attention
+    finalization_review = classify_finalization_review_need(capsule)
+    if finalization_review["status"] == "required":
+        payload["finalization_review"] = finalization_review
+    return payload
 
 
 def _claim_block(trigger: str) -> str | None:
@@ -204,6 +362,7 @@ def _claim_block(trigger: str) -> str | None:
         "workspace_revalidation_required": "workspace_revalidated",
         "open_loops_at_stage_exit": "remaining_work_resolved",
         "unchanged_dispatch_repeated": "changed_dispatch_verified",
+        "finalization_surface_review_required": "final_surface_reviewed_and_read_back",
     }.get(trigger)
 
 
@@ -212,7 +371,7 @@ def _dynamic_payload(
 ) -> dict[str, Any]:
     relation = _relation(capsule)
     trigger = str(reminder.get("trigger") or "unknown")
-    return {
+    payload = {
         "trigger": trigger,
         "why_now_code": trigger,
         "required_action": _bounded_text(reminder.get("required_action"), 800),
@@ -221,6 +380,10 @@ def _dynamic_payload(
         "claim_blocked_until": _claim_block(trigger),
         "expires_when": _bounded_text(reminder.get("expires_when"), 320) or None,
     }
+    timing = _bounded_text(reminder.get("timing"), 160)
+    if timing:
+        payload["timing"] = timing
+    return payload
 
 
 def _projection_source(
@@ -312,6 +475,11 @@ def project_runtime(
             "validity_review_required": bool(
                 capsule.get("semantic_review_required")
                 or capsule.get("workspace_review_required")
+            ),
+            "capability_query": (
+                payload.get("finalization_review", {}).get("capability_query")
+                if projection_type == "global_causal_task"
+                else None
             ),
         },
         "payload": payload,

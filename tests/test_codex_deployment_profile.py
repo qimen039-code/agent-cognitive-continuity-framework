@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,13 +59,14 @@ def test_codex_profile_resolves_a_complete_runtime_bundle() -> None:
         assert (ROOT / relative).is_file(), relative
 
 
-def test_codex_bundle_receipt_matches_staged_files() -> None:
+@pytest.mark.parametrize("profile_name", ["codex-local-minimal", "codex-local-source-recall"])
+def test_codex_bundle_receipt_matches_staged_files(profile_name: str) -> None:
     bundle = load_bundle_module()
     temp_root = INTEGRATION / ".test-tmp"
     temp_root.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="deployment-", dir=temp_root))
     try:
-        receipt = bundle.stage("codex-local-minimal", output)
+        receipt = bundle.stage(profile_name, output)
         stored = json.loads(
             (output / "cbh-deployment-receipt.json").read_text(encoding="utf-8")
         )
@@ -85,6 +87,13 @@ def test_codex_bundle_receipt_matches_staged_files() -> None:
             check=False,
         )
         assert completed.returncode == 0, completed.stderr
+        if profile_name == "codex-local-source-recall":
+            for name in ("context_recall.py", "text_source_reader.py"):
+                completed = subprocess.run(
+                    [sys.executable, "-B", str(output / "skills" / "embedded-harness" / name), "--help"],
+                    cwd=output, capture_output=True, text=True, encoding="utf-8", check=False,
+                )
+                assert completed.returncode == 0, completed.stderr
     finally:
         shutil.rmtree(output, ignore_errors=True)
         try:

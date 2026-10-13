@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -16,6 +17,7 @@ from execution_feedback import (
 
 
 SCHEMA = "cbh.behavior_correction_gate_receipt.v1"
+EFFECTIVENESS_SCHEMA = "cbh.correction_effectiveness_receipt.v2"
 
 _DECISION_BY_MODE = {
     "auto_rewrite": "rewrite_candidate",
@@ -140,6 +142,138 @@ def build_behavior_correction_receipt(
         "automatic_policy_mutation": False,
         "host_blocking": False,
         "rule": "Bind one unchanged current candidate to the most conservative applicable correction mode and its declared verifier; priority orders matching profiles, and no match is a no-op.",
+    }
+
+
+def classify_correction_effectiveness(
+    *,
+    correction_receipt: dict[str, Any],
+    host_observation: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify why a correction did or did not affect one observed dispatch."""
+
+    matches = correction_receipt.get("matches")
+    match_count = len(matches) if isinstance(matches, list) else 0
+    decision = str(correction_receipt.get("decision") or "no_match")
+    surface_status = str(host_observation.get("surface_status") or "observable")
+    hook_fired = host_observation.get("hook_fired") is True
+    rewrite_applied = host_observation.get("rewrite_applied") is True
+    known_failure_observed = host_observation.get("known_failure_observed") is True
+    source_signature = str(host_observation.get("source_signature") or "")
+    receipt_source_signature = str(correction_receipt.get("text_sha256") or "")
+    dispatch_signature = str(host_observation.get("dispatch_signature") or "")
+    result_hash = str(host_observation.get("result_hash") or "")
+    tool_use_id = str(host_observation.get("tool_use_id") or "")
+    verifier_raw = host_observation.get("verifier_result")
+    verifier = dict(verifier_raw) if isinstance(verifier_raw, dict) else {}
+    verifier_status = str(verifier.get("status") or "not_run")
+    verifier_evidence = str(verifier.get("evidence_sha256") or "")
+    hash_pattern = re.compile(r"[0-9a-f]{64}")
+    source_bound = bool(
+        hash_pattern.fullmatch(source_signature)
+        and source_signature == receipt_source_signature
+    )
+    profile_hashes_valid = bool(
+        match_count
+        and all(
+            isinstance(match, dict)
+            and hash_pattern.fullmatch(str(match.get("profile_sha256") or ""))
+            for match in matches
+        )
+    )
+    observation_identity_complete = bool(
+        tool_use_id
+        and source_bound
+        and hash_pattern.fullmatch(dispatch_signature)
+        and hash_pattern.fullmatch(result_hash)
+    )
+    verifier_passed = bool(
+        verifier_status == "passed"
+        and hash_pattern.fullmatch(verifier_evidence)
+        and verifier.get("verifier_id")
+        and verifier.get("verifier_version")
+    )
+    task_effect = str(host_observation.get("task_effect") or "unbound")
+    if task_effect not in {"satisfied", "failed", "inconclusive", "unbound", "stale_or_orphan"}:
+        task_effect = "unbound"
+
+    if surface_status in {"unsupported", "not_exposed", "unobservable"}:
+        applicability = "unsupported_surface"
+        gap_class = "interface_gap"
+        correction_effect = "unsupported"
+    elif match_count == 0 or decision == "no_match":
+        if known_failure_observed and source_bound:
+            applicability = "known_failure_uncovered"
+            gap_class = "coverage_gap"
+            correction_effect = "not_applied"
+        elif known_failure_observed:
+            applicability = "ambiguous_candidate"
+            gap_class = "consumer_verification_gap"
+            correction_effect = "stale_or_orphan"
+        else:
+            applicability = "not_applicable"
+            gap_class = "none"
+            correction_effect = "not_applicable"
+    elif not hook_fired:
+        applicability = "exact_profile_match"
+        gap_class = "activation_gap"
+        correction_effect = "not_applied"
+    elif decision == "rewrite_candidate" and not rewrite_applied:
+        applicability = "exact_profile_match"
+        gap_class = "action_application_gap"
+        correction_effect = "not_applied"
+    elif not observation_identity_complete or not profile_hashes_valid:
+        applicability = "exact_profile_match"
+        gap_class = "consumer_verification_gap"
+        correction_effect = (
+            "stale_or_orphan" if source_signature and not source_bound else "applied_unverified"
+        )
+    elif verifier_status == "failed":
+        applicability = "exact_profile_match"
+        gap_class = "no_gap"
+        correction_effect = "applied_failed"
+    elif not verifier_passed:
+        applicability = "exact_profile_match"
+        gap_class = "consumer_verification_gap"
+        correction_effect = "applied_unverified"
+    else:
+        applicability = "exact_profile_match"
+        gap_class = "no_gap"
+        correction_effect = "applied_verified"
+
+    effectiveness = (
+        "effective"
+        if correction_effect == "applied_verified"
+        else "not_applicable"
+        if correction_effect == "not_applicable"
+        else "not_effective"
+    )
+
+    return {
+        "schema": EFFECTIVENESS_SCHEMA,
+        "status": "observed",
+        "effectiveness": effectiveness,
+        "applicability": applicability,
+        "gap_class": gap_class,
+        "pipeline_gap": gap_class,
+        "correction_effect": correction_effect,
+        "task_effect": task_effect,
+        "decision": decision,
+        "profile_match_count": match_count,
+        "surface_status": surface_status,
+        "hook_fired": hook_fired,
+        "rewrite_applied": rewrite_applied,
+        "known_failure_observed": known_failure_observed,
+        "observation_identity_complete": observation_identity_complete,
+        "source_signature_bound": source_bound,
+        "verifier_result": {
+            "verifier_id": verifier.get("verifier_id"),
+            "verifier_version": verifier.get("verifier_version"),
+            "status": verifier_status,
+            "evidence_sha256": verifier.get("evidence_sha256"),
+        },
+        "scope": "current_observed_dispatch_only",
+        "host_blocking": False,
     }
 
 

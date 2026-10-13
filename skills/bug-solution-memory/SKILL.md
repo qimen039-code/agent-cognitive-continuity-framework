@@ -1,6 +1,6 @@
 ---
 name: bug-solution-memory
-description: Empty template for paired bug/problem solution memory. Use to record investigation order, fix path, rollback, validation, caveats, and reuse rules for solved incidents.
+description: "Use when a specific stored Codex/local-tooling solution needs source validation, or the user authorizes saving an incident solution. Ordinary debugging and sufficient native recall do not require this record workflow."
 ---
 
 # Bug Solution Memory

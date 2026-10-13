@@ -1,0 +1,27 @@
+{
+  "catalog_files": [
+    "C:/path/to/private-native-memory/MEMORY.md"
+  ],
+  "catalog_globs": [
+    {
+      "root": "C:/path/to/private-native-memory/rollout_summaries",
+      "pattern": "*.md"
+    }
+  ],
+  "catalog_index": "C:/path/to/disposable-context-index/catalog.zip",
+  "session_roots": [
+    "C:/path/to/private-session-history"
+  ],
+  "state_db": "C:/path/to/optional-host-state.sqlite",
+  "command_path": "C:/path/to/adopted/skills/embedded-harness/context_recall.py",
+  "max_context_chars": 2200,
+  "max_cards": 3,
+  "max_excerpt_chars": 400,
+  "max_history_bytes": 33554432,
+  "tail_bytes": 262144,
+  "max_record_bytes": 524288,
+  "max_search_ms": 650,
+  "max_catalog_refresh_bytes": 2097152,
+  "max_linked_histories": 2,
+  "follow_linked_histories": true
+}

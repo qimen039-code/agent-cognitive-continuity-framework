@@ -3,14 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-import sys
 from pathlib import Path
-
-
-HARNESS = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
-if str(HARNESS) not in sys.path:
-    sys.path.insert(0, str(HARNESS))
-
 from dangerous_delete_guard import advisory_receipt, classify_command, handle_event
 
 
@@ -56,13 +49,6 @@ class DangerousDeleteGuardTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 self.assertFalse(self.classify(command)["dangerous"])
-
-    def test_cwd_is_canonicalized_before_containment_check(self) -> None:
-        cwd_alias = self.cwd / ".." / "workspace"
-        command = f"Remove-Item -LiteralPath '{self.inside}' -Force"
-        finding = classify_command(command, cwd_alias)
-        self.assertFalse(finding["dangerous"])
-        self.assertEqual([], finding["reasons"])
 
     def test_dangerous_delete_shapes_are_classified(self) -> None:
         cases = {

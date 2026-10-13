@@ -3,122 +3,75 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-import sys
+from unittest.mock import patch
 from pathlib import Path
-
-
-HARNESS = Path(__file__).resolve().parents[1] / "skills" / "embedded-harness"
-if str(HARNESS) not in sys.path:
-    sys.path.insert(0, str(HARNESS))
 
 from nested_tool_preflight import (
     normalize_nested_tool_result,
     preflight_nested_tool_call,
 )
-from task_continuity import plan_transport
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nested_tool_failures.json"
 
 
 class NestedToolPreflightTests(unittest.TestCase):
-    def test_transport_plan_pages_full_text_without_legacy_prefix_loss(self) -> None:
-        original = "0123456789" * 31
-        plan = plan_transport(
-            None,
-            {"kind": "text", "original_chars": len(original), "original_items": 1},
-            {"max_chars": 29, "max_items": 10},
-        )
-        parts: list[str] = []
-        cursor = None
-        while True:
-            normalized = normalize_nested_tool_result(
-                original,
-                transport_plan=plan,
-                cursor=cursor,
-            )
-            page = normalized["transport_page"]
-            parts.append(page["content"])
-            if page["next_cursor"] is None:
-                break
-            cursor = page["next_cursor"]
+    def test_current_exec_command_validates_syntax_outside_registered_rewrites(self) -> None:
+        arguments = {"cmd": "Write-Output (", "shell": "pwsh"}
+        receipt = preflight_nested_tool_call({"tool_name": "exec_command", "arguments": arguments})
+        self.assertEqual("validation_required", receipt["decision"])
+        self.assertIn("powershell_parser_rejection", receipt["reasons"])
+        self.assertEqual(arguments, receipt["normalized_arguments"])
+        self.assertFalse(receipt["rewrite_applied"])
 
-        self.assertEqual(original, "".join(parts))
-        self.assertEqual(normalized["source_sha256"], page["full_result_sha256"])
-        self.assertFalse(normalized["inline_payload_present"])
+    def test_unavailable_parser_does_not_produce_an_allow_receipt(self) -> None:
+        with patch("nested_tool_preflight.powershell_parser_error_ids", return_value=None):
+            receipt = preflight_nested_tool_call({"tool_name": "exec_command", "arguments": {"cmd": "Get-Location"}})
+        self.assertEqual("validation_required", receipt["decision"])
+        self.assertIn("powershell_parser_unavailable", receipt["reasons"])
 
-    def test_transport_plan_pages_typed_blocks_without_inline_media(self) -> None:
-        secret = "base64-secret-payload"
-        result = {
-            "content": [
-                {"type": "text", "text": f"line-{index}"}
-                for index in range(7)
-            ]
-            + [{"type": "image", "mimeType": "image/png", "data": secret}]
+    def test_current_exec_command_roundtrips_actual_host_arguments(self) -> None:
+        arguments = {
+            "cmd": "Get-Location", "workdir": r"C:\work",
+            "shell": "pwsh.exe", "login": False, "tty": False,
+            "max_output_tokens": 1800, "yield_time_ms": 10000,
         }
-        plan = plan_transport(
-            None,
-            {"kind": "items", "original_chars": 100, "original_items": 8},
-            {"max_chars": 120, "max_items": 3},
-        )
-        items: list[dict] = []
-        cursor = None
-        while True:
-            normalized = normalize_nested_tool_result(
-                result,
-                transport_plan=plan,
-                cursor=cursor,
-            )
-            page = normalized["transport_page"]
-            items.extend(page["items"])
-            if page["next_cursor"] is None:
-                break
-            cursor = page["next_cursor"]
+        receipt = preflight_nested_tool_call({"tool_name": "exec_command", "arguments": arguments})
+        self.assertEqual("allow", receipt["decision"])
+        self.assertEqual(arguments, receipt["normalized_arguments"])
+        self.assertEqual("exec_command", receipt["tool_name"])
 
-        serialized = json.dumps(items, ensure_ascii=False)
-        self.assertEqual(8, len(items))
-        self.assertNotIn(secret, serialized)
-        self.assertTrue(items[-1]["inline_payload_omitted_from_text"])
+    def test_current_exec_command_rewrite_preserves_transport_and_retry_identity(self) -> None:
+        arguments = {
+            "cmd": "foreach ($n in 1..3) { $n } | Sort-Object",
+            "shell": "pwsh", "max_output_tokens": 900, "yield_time_ms": 10000,
+        }
+        candidate = {"tool_name": "exec_command", "arguments": arguments}
+        receipt = preflight_nested_tool_call(candidate)
+        self.assertEqual("rewrite_candidate", receipt["decision"])
+        expected = {**arguments, "cmd": "$(foreach ($n in 1..3) { $n }) | Sort-Object"}
+        self.assertEqual(expected, receipt["normalized_arguments"])
+        self.assertNotIn("command", receipt["normalized_arguments"])
+        retried = preflight_nested_tool_call({**candidate, "previous_failure_signature": receipt["dispatch_signature"]})
+        self.assertTrue(retried["same_candidate"])
+        self.assertIn("unchanged_dispatch_after_failure", retried["reasons"])
 
-    def test_transport_cursor_is_bound_to_the_full_nested_result(self) -> None:
-        plan = plan_transport(
-            None,
-            {"kind": "text", "original_chars": 20, "original_items": 1},
-            {"max_chars": 5, "max_items": 10},
-        )
-        with self.assertRaisesRegex(ValueError, "cursor_result_hash_mismatch"):
-            normalize_nested_tool_result(
-                "different result",
-                transport_plan=plan,
-                cursor={
-                    "result_sha256": "0" * 64,
-                    "mode": "text",
-                    "next_char": 5,
-                },
-            )
+    def test_current_exec_command_validates_native_fields(self) -> None:
+        for arguments in ({"cmd": 3}, {"cmd": "Get-Location", "tty": "false"},
+                          {"cmd": "Get-Location", "yield_time_ms": True},
+                          {"cmd": "Get-Location", "max_output_tokens": "100"},
+                          {"cmd": "Get-Location", "command": "Get-Date"}):
+            with self.subTest(arguments=arguments):
+                receipt = preflight_nested_tool_call({"tool_name": "exec_command", "arguments": arguments})
+                self.assertEqual("semantic_review_required", receipt["decision"])
+                self.assertEqual(arguments, receipt["normalized_arguments"])
 
-    def test_transport_plan_chunks_one_oversized_text_block(self) -> None:
-        original = "中文工具结果" * 300
-        result = {"content": [{"type": "text", "text": original}]}
-        plan = plan_transport(
-            None,
-            {"kind": "items", "original_chars": len(original), "original_items": 1},
-            {"max_chars": 420, "max_items": 2},
-        )
-        rebuilt: list[str] = []
-        cursor = None
-        while True:
-            normalized = normalize_nested_tool_result(
-                result,
-                transport_plan=plan,
-                cursor=cursor,
-            )
-            page = normalized["transport_page"]
-            rebuilt.extend(item["text"] for item in page["items"])
-            if page["next_cursor"] is None:
-                break
-            cursor = page["next_cursor"]
-        self.assertEqual(original, "".join(rebuilt))
+    def test_other_shell_is_never_rewritten_as_powershell(self) -> None:
+        arguments = {"cmd": "foreach ($n in 1..3) { $n } | Sort-Object", "shell": "/bin/bash"}
+        receipt = preflight_nested_tool_call({"tool_name": "exec_command", "arguments": arguments})
+        self.assertFalse(receipt["rewrite_applied"])
+        self.assertEqual(arguments, receipt["normalized_arguments"])
+        self.assertIn("shell_parser_not_covered", receipt["reasons"])
 
     def test_inline_multi_runtime_commands_require_a_file_backed_carrier(self) -> None:
         for command in (
@@ -452,7 +405,7 @@ class NestedToolPreflightTests(unittest.TestCase):
             {
                 "tool_name": "shell_command",
                 "arguments": {
-                    "command": "Get-ChildItem -Recurse -LiteralPath 'C:\\Users\\Example\\.codex\\sessions'"
+                    "command": "Get-ChildItem -Recurse -LiteralPath 'C:\\Users\\example\\.codex\\sessions'"
                 },
             }
         )
@@ -460,7 +413,7 @@ class NestedToolPreflightTests(unittest.TestCase):
             {
                 "tool_name": "shell_command",
                 "arguments": {
-                    "command": "Get-ChildItem -LiteralPath 'C:\\Users\\Example\\.codex\\sessions\\2026\\08\\10' | Select-Object -First 10"
+                    "command": "Get-ChildItem -LiteralPath 'C:\\Users\\example\\.codex\\sessions\\2026\\08\\10' | Select-Object -First 10"
                 },
             }
         )
@@ -472,7 +425,7 @@ class NestedToolPreflightTests(unittest.TestCase):
             {
                 "tool_name": "shell_command",
                 "arguments": {
-                    "command": "rg -n -F error 'C:\\Users\\Example\\.codex\\sessions\\2026\\08\\03\\rollout-active.jsonl'"
+                    "command": "rg -n -F error 'C:\\Users\\example\\.codex\\sessions\\2026\\08\\03\\rollout-active.jsonl'"
                 },
             }
         )
