@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "name": "accf-capability-map",
+  "contract": "states distinguish configured/exposed/authenticated/callable/action_covered; registration is local metadata, not current exposure",
+  "tools": [
+    {
+      "name": "github-connector",
+      "kind": "mcp",
+      "description": "GitHub repos/PRs/issues/files via Trae GitHub connector",
+      "match": ["github", "repository", "pull request", "issue", "release", "仓库", "提交", "代码审查"],
+      "states": { "configured": true, "exposed": true, "authenticated": true, "callable": true, "action_covered": true }
+    },
+    {
+      "name": "text-source-reader",
+      "kind": "skill",
+      "description": "Repeated scoped text/code reading from exact sources (ACCF skill)",
+      "match": ["read file", "source reading", "反复读取", "源文件", "阅读源码"],
+      "states": { "configured": true, "exposed": true, "authenticated": true, "callable": false, "action_covered": true }
+    },
+    {
+      "name": "capability-router",
+      "kind": "skill",
+      "description": "Find bounded fallback when exposed tools cannot cover a concrete action (ACCF skill)",
+      "match": ["missing tool", "capability missing", "工具缺失", "能力不足", "fallback"],
+      "states": { "configured": true, "exposed": true, "authenticated": true, "callable": false, "action_covered": true }
+    },
+    {
+      "name": "troubleshooting-skill-matrix",
+      "kind": "skill",
+      "description": "ACCF maintenance and recurring incident routing (semantic anchors, ERR/SOL ledgers)",
+      "match": ["troubleshoot", "error memory", "故障", "报错", "排错", "错误记忆"],
+      "states": { "configured": true, "exposed": true, "authenticated": true, "callable": false, "action_covered": true }
+    },
+    {
+      "name": "accf-store-health",
+      "kind": "script",
+      "description": "Run mechanical validation over this ACCF store (hash/index/chain integrity). accf_call executes in the data home, so register an absolute command path (see README '挂载存量脚本').",
+      "match": ["validate store", "check memory", "校验", "一致性检查", "integrity"],
+      "command": "python -B <部署目录>/accf_core.py",
+      "states": { "configured": true, "exposed": true, "authenticated": true, "callable": true, "action_covered": true }
+    }
+  ]
+}

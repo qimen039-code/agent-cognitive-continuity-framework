@@ -6,6 +6,42 @@ This project uses `vMAJOR.MINOR.PATCH` version labels.
 
 ## Unreleased
 
+## v2.0.0 - 2026-10-15
+
+- Shipped ACCF-MCP: the MCP service gateway for the ACCF framework, exposing
+  memory, handoff, protocol, routing and advisory-judge capabilities as MCP
+  tools for any MCP client (Trae / Claude Desktop / Cursor).
+- Markdown source-of-truth store with provenance frontmatter (world_id,
+  step_count, success_count, disconfirmation); the SQLite index is fully
+  rebuildable and never authoritative.
+- Million-scale hybrid recall: lexical inverted-index TF-IDF fused with a
+  local vector channel (sqlite-vec two-stage: bit-quantized coarse pass at
+  k=100 followed by float exact rerank, bge-small-zh-v1.5 embeddings) via
+  Reciprocal Rank Fusion. Measured recall@10 = 0.97 at 1M entries with
+  sub-second latency; the vector channel degrades to lexical-only with an
+  explicit channel flag when fastembed is unavailable.
+- Evidence-gated episode retrieval (`accf_episodes`) for the Laya decision
+  head: recall, then verify actual content (only logs holding successful
+  attempts for the exact current context survive), then keep the freshest
+  version per world. Honest statuses linked / empty / no_log — an empty
+  result never falls back to unrelated history, which would poison the judge.
+- Laya P6t bilingual decision head integrated through a single boundary
+  adapter (`laya_judge`, kind=script in the capability map): candidate
+  actions rendered into the tested wordings and scored as advisory logits.
+  Call protocol: accf_episodes -> laya_judge -> write the outcome back.
+- Bulk ingestion (`accf_save_many`): batched embedding (title-only input,
+  measured 22x faster than title+body with better top-1 accuracy), pipelined
+  chunked writes with per-chunk commit and a hard timeout that always leaves
+  completed work committed and reports `complete` honestly.
+- `accf_backfill` rebuilds secondary indexes idempotently and resumes after
+  interruption.
+- Epistemic layer retained: disconfirmation on memories, unknowns on
+  handoffs, hash-chained protocols surfaced deterministically by
+  context_tags, and ACCF's configured/exposed/authenticated/callable/
+  action_covered state contract in the capability map.
+- Portable test suites: core engine tests (stdlib only) and MCP protocol
+  end-to-end tests over stdio.
+
 ## v1.2.9 - 2026-10-13
 
 - Canonicalize working-directory paths before deletion-scope classification,
