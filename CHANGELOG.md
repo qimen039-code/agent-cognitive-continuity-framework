@@ -6,6 +6,32 @@ This project uses `vMAJOR.MINOR.PATCH` version labels.
 
 ## Unreleased
 
+## v2.1.0 - 2026-10-16
+
+- Dreaming sandbox (`accf_sandbox`): deterministic replay of candidate actions
+  against the raw episodes held in memory — the accumulated history is itself
+  an exact simulator of the search space it reached, no learned world model
+  needed (port of Dream-RSI, arXiv:2609.14858). 16 candidates always scored,
+  untried ones stay neutral, shrinkage toward a neutral prior keeps a single
+  success from locking in a strategy, and cross-world sampling flags
+  candidates confirmed in only one world as local accidents. Replay scores
+  prune candidates only; real outcomes remain the final arbiter.
+- Distillation gate for protocols: `accf_protocol_add(distilled=True)` marks
+  one-line generalizations of raw episodes; `accf_protocol_match` withholds
+  them by default and surfaces them only on opt-in. Motivation from Dream-RSI:
+  semantic guidance over experience consistently underperforms replay under
+  equal budgets, so distilled lessons must not silently outrank raw history.
+- Recall gate semantics fixed for cross-language queries: the cosine gate now
+  exempts exact full-body FTS token evidence and lexical+semantic dual-channel
+  consensus, while single-channel title-only candidates stay gated. An English
+  query against Chinese-titled entries (measured cosine 0.529 vs the 0.55
+  threshold) previously returned nothing despite both channels hitting.
+- Host-memory bridge (`accf_native_recall` / `accf_native_read` /
+  `accf_native_status`): read-only access to host-native memory with handles;
+  never writes to the host and never mixes scores. Reports unavailable when no
+  host adapter is deployed (expected degradation, explicitly flagged).
+- `accf_clock` real-time clock tool (zero dependency, OS-local time alignment).
+
 ## v2.0.0 - 2026-10-15
 
 - Shipped ACCF-MCP: the MCP service gateway for the ACCF framework, exposing

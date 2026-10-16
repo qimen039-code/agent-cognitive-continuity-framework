@@ -5,6 +5,19 @@
 [![Smoke checks](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml)
 [![Zenodo concept DOI](./docs/assets/doi-badge.svg)](https://doi.org/10.5281/zenodo.21189879)
 
+## Read the design contracts before changing behaviour
+
+Behaviour and the tool surface are derived from the contracts under `docs/`, and
+`docs/non-goals.md` is what keeps the framework from growing capabilities that
+were deliberately excluded — the ones that "look like they should exist" are
+usually exactly those.
+
+At minimum: `docs/architecture.md`, `docs/non-goals.md`,
+`docs/context-recall.md`, `docs/conversation-memory-lane.md`,
+`docs/hybrid-memory-retrieval-contract.md`, `docs/router-decision-contract.md`.
+Reading order and rationale: [ACCF-MCP integration
+notes](integrations/accf-mcp/README.md).
+
 ## In 30 Seconds
 
 Agent Cognitive Continuity Framework (ACCF) is a model-facing, external
@@ -598,6 +611,7 @@ unbounded context growth.
 - [docs/integrations/codex.md](docs/integrations/codex.md)
 - [integrations/codex-local/deployment-profile.json](integrations/codex-local/deployment-profile.json)
 - [integrations/codex-local/build-deployment-bundle.py](integrations/codex-local/build-deployment-bundle.py)
+- [integrations/accf-mcp/README.md](integrations/accf-mcp/README.md) — ACCF-MCP: memory, handoff, protocol, routing and advisory-judge capabilities as MCP tools, plus the dreaming sandbox (`accf_sandbox`) that replays raw episodes deterministically (Dream-RSI, arXiv:2609.14858)
 
 ## Why Skills Are Bounded
 

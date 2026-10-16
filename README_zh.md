@@ -5,6 +5,16 @@
 [![Smoke checks](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/qimen039-code/agent-cognitive-continuity-framework/actions/workflows/smoke.yml)
 [![Zenodo concept DOI](./docs/assets/doi-badge.svg)](https://doi.org/10.5281/zenodo.21189879)
 
+## 改行为前先读设计文档
+
+框架的行为与工具面都是从 `docs/` 下的设计契约推导出来的，`docs/non-goals.md` 尤其定义了
+"不做什么"——而"看起来该有"的能力，往往正好是被明确排除的那一类。
+
+改动行为前至少读：`docs/architecture.md`、`docs/non-goals.md`、`docs/context-recall.md`、
+`docs/conversation-memory-lane.md`、`docs/hybrid-memory-retrieval-contract.md`、
+`docs/router-decision-contract.md`。阅读顺序与理由见
+[ACCF-MCP 集成说明](integrations/accf-mcp/README.md)。
+
 ## 当前维护更新
 
 授权按用户明确任务范围和宿主权限生效。路由、技能和阶段切换不消耗既有授权，
@@ -396,7 +406,9 @@ python -m pytest tests
 ACCF 应在每个采用者自己的本地 lane 中成长。项目专属记忆、fieldnote、已解决事故、客户端部署观察应留在私有 overlay 或项目本地文件中；只有可复用的通用规则和测试才应提升回公开包。
 
 当前集成入口、可调用表面和客户端更新后的复核方法见
-[docs/integrations/codex.md](docs/integrations/codex.md)。
+[docs/integrations/codex.md](docs/integrations/codex.md)；MCP 网关
+（记忆 / 交接 / 协议 / 路由 / 建议者判断，含梦境沙盒 `accf_sandbox`）
+见 [integrations/accf-mcp/README.md](integrations/accf-mcp/README.md)。
 
 ## 关键文档
 

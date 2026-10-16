@@ -2,6 +2,24 @@
 
 ACCF（agent-cognitive-continuity-framework）的本地 MCP 服务化网关。把记忆、交接、协议、路由、判断五类能力挂载为 MCP 工具，任何 MCP 客户端（Trae / Claude Desktop / Cursor）配置一次即全局可用，覆盖所有对话。
 
+## 改行为前必读设计文档
+
+工具面是从设计契约推导的，不是随手长出来的。改 `server.py` / `accf_core.py` 的行为之前，
+先读仓库 `docs/` 下这几份（**跳过这一步最容易加进"看起来该有"的能力，破坏来源保真或
+重复宿主已有能力**）：
+
+| 契约 | 为什么必须先读 |
+|---|---|
+| `docs/architecture.md` | 各层职责与允许的依赖方向 |
+| `docs/non-goals.md` | 明确排除项：不做完整记忆后端、不做跨 agent 自动记忆共享。这条决定了"宿主已有记忆时 ACCF 不再写一份" |
+| `docs/context-recall.md` | 可选上下文召回的契约（宿主原生记忆适配层的实现依据） |
+| `docs/conversation-memory-lane.md` | 会话记忆通道的量与边界 |
+| `docs/hybrid-memory-retrieval-contract.md` | 混合召回的分数语义（RRF 是排序量，余弦才是相似度） |
+| `docs/router-decision-contract.md` | accf_route / accf_call 的状态契约与白名单边界 |
+
+部署侧若按 `docs/context-recall.md` 接入宿主原生记忆（如 WorkBuddy），那是**部署层**的
+桥接：只读宿主记忆文件与会话记录，不写宿主记忆、不调模型，也不把两套分数混在一起比。
+
 ## 能力总览
 
 | 层 | 能力 | 实现 |
@@ -65,7 +83,7 @@ stdio 方式运行：`python server.py`（env `ACCF_HOME` 可选）。
 }
 ```
 
-## 工具清单（14 个）
+## 工具清单（19 个）
 
 ### 记忆
 
@@ -83,8 +101,8 @@ stdio 方式运行：`python server.py`（env `ACCF_HOME` 可选）。
 |---|---|
 | `accf_handoff_write` | 写任务交接（自动取代同 task_id 旧交接），`unknowns` + `disconfirmation` 保持诚实 |
 | `accf_handoff_read` | 读最新交接（按任务或最近 10 条） |
-| `accf_protocol_add` | 把验证过的教训沉淀为 hash-chain 协议 |
-| `accf_protocol_match` | 任务开始时按 context_tags 确定性浮现相关协议 |
+| `accf_protocol_add` | 把验证过的教训沉淀为 hash-chain 协议。`distilled=True` 标记一行式概括（从原味经历蒸馏的格言），此类条目默认不被 `accf_protocol_match` 浮现 |
+| `accf_protocol_match` | 任务开始时按 context_tags 确定性浮现相关协议；`include_distilled=True` 才包含蒸馏条目 |
 
 ### 路由与执行
 
@@ -100,6 +118,15 @@ stdio 方式运行：`python server.py`（env `ACCF_HOME` 可选）。
 | 工具 | 作用 |
 |---|---|
 | `accf_episodes` | 证据门经历检索：混合召回 → 内容校验（只保留含当前状态成功经历的日志）→ 同 world 取最新版本。status: `linked` / `empty` / `no_log`——`empty` 时禁止退化喂无关经历（会污染判断） |
+| `accf_sandbox` | 梦境沙盒：对记忆中的原始经历做确定性重放，对候选动作打分（收缩先验防单次成功锁死），并做跨 world 校验。重放分数只做剪枝，真实结果才是最终裁决者 |
+
+### 宿主记忆桥（native）
+
+| 工具 | 作用 |
+|---|---|
+| `accf_native_recall` | 只读宿主原生记忆/会话记录，返回 handle（不混分、不写宿主） |
+| `accf_native_read` | 按 handle 分页读宿主记忆内容 |
+| `accf_native_status` | 宿主桥可用性探测（未部署宿主适配时返回 unavailable，属预期降级） |
 
 ## Laya 判断头调用协议
 
@@ -120,6 +147,38 @@ stdio 方式运行：`python server.py`（env `ACCF_HOME` 可选）。
 - CPU 冷启动约 8-16s，单批推理约 0.6-1s
 
 实测（256 步真实 xor_mix 世界）：按状态检索成功经历喂入时 3/4 状态 top-1 命中；无差别滑动窗口喂法反而把准确率从 rank 1 拖到 rank 13——**记忆链接质量决定判断头强弱**。
+
+## 梦境沙盒（Dream-RSI 复刻）
+
+动机来自 Dream-RSI（arXiv:2609.14858，Google/DeepMind 等，2026-09）：把已实现的搜索空间做**确定性重放**，比在经历上再做"语义指导/格言蒸馏"更强——论文原话 "semantic guidance is *worse* than replay ... consistently underperforms its unguided counterpart under equal budgets"。历史本身就是精确模拟器，不需要学习型世界模型。
+
+`accf_sandbox([b1,b2,b3,b4], k=8)` 的三条复刻纪律：
+
+1. **只读确定性重放**——只读已记录的 (bits, pair, success) 三元组，不做想象 rollout
+2. **候选集永远完整**——16 个候选动作全部打分，未试过的保持中性 0.5，不会因为"没试过"被压制
+3. **收缩先验**——`score = (sum(hits) + 1.5) / (len(hits) + 3)`，单次成功不会锁死策略
+
+配套的蒸馏闸：`protocol_add(distilled=True)` 标记从原味经历概括出的一行式格言，`protocol_match` 默认**不浮现**蒸馏条目，opt-in 才 surfaced。原味经历走 `accf_episodes` / `accf_sandbox`，格言只是备查。
+
+调用闭环：
+
+```
+accf_episodes([b1,b2,b3,b4])     → status=linked 时取 episodes
+accf_sandbox([b1,b2,b3,b4])      → dreamed：16 候选重放分 + 跨 world 校验
+  （两者独立：sandbox 自己重放 memory 里的原始 trace，不依赖 episodes 的喂法）
+laya_judge ...                   → 决策头建议
+执行后 accf_save 回写            → 下次 sandbox / episodes 更强
+```
+
+沙盒输出示例（live store，状态 0000，1 个 world）：
+
+```json
+{"status": "dreamed", "bits": [0,0,0,0], "worlds_sampled": 1, "episodes_sampled": 4,
+ "candidates": [{"candidate": [2,2], "score": 0.7857, "observed": 4}, ...],
+ "report": "4 raw episodes from 1 world(s) replayed; replay scores prune only — real outcomes remain the arbiter"}
+```
+
+跨 world 采样 ≥2 时，前 4 候选附 `worlds_confirmed` / `worlds_sampled` / `transferable`：只在单一 world 成立的候选被标为局部偶然，不作为可迁移结论。
 
 ## 挂载存量脚本
 

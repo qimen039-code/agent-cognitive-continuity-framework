@@ -12,3 +12,4 @@ tasks.local/
 .text-source-cache/
 integrations/codex-local/.test-tmp/
 skills/capability-router/registry.local/
+/accf-mcp/

@@ -215,6 +215,11 @@ jobs:
       - name: Run cbh-doctor diagnostics
         run: python tools/cbh_doctor.py --repo-root . --json
 
+      - name: Run ACCF-MCP core smoke tests
+        env:
+          ACCF_NO_VECTOR: "1"
+        run: python -B integrations/accf-mcp/test_accf.py
+
       - name: Run external retrieval regression checks
         shell: pwsh
         run: pwsh -NoProfile -File .\tests\test_external_retrieval_strategy.ps1
